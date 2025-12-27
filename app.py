@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import yfinance as yf
 import requests
 from bs4 import BeautifulSoup
 import os
@@ -12,7 +11,7 @@ DATA_FILE = 'trade_data_v3.csv'
 HWM_FILE = 'hwm_data_v3.csv'
 TAX_RATE = 0.15  # 報酬率
 
-st.set_page_config(page_title="GIT Fuyaseru Manager", layout="wide")
+st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
 
 # --- 関数定義 ---
 def load_data():
@@ -51,14 +50,13 @@ def get_stock_name_jp(code):
         return f"コード {code}"
 
 # --- メイン画面 ---
-st.title("💹 GIT Fuyaseru Manager")
+st.title("J_Phantom_Gear")
 
 # タブメニュー
 tab1, tab2, tab3 = st.tabs(["📝 1. 新規買付 (保有)", "🔄 2. 決済 (利確/損切)", "💰 3. 報酬確認"])
 
 # --- タブ1：新規買付 ---
 with tab1:
-    st.markdown("### 新しく株を買ったらここに入力")
     with st.form("entry_form"):
         col1, col2 = st.columns(2)
         with col1:
