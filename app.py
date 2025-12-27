@@ -5,150 +5,173 @@ from datetime import datetime
 # --- 1. 初期設定と関数定義 ---
 
 def init_session_state():
-    """セッション状態の初期化"""
-    # 保有銘柄リスト（辞書形式で管理：Codeをキーにするのが管理しやすい）
-    # 構造: {'7203': {'name': 'トヨタ', 'qty': 100, 'avg_price': 2000.0}, ...}
+    # ポートフォリオ構造: 
+    # {'Code': {'qty': 保有数, 'avg_price': 平均単価, 'realized_pl': 累計確定損益}}
     if 'portfolio' not in st.session_state:
         st.session_state['portfolio'] = {}
     
-    # 履歴表示用のログ
     if 'trade_log' not in st.session_state:
         st.session_state['trade_log'] = []
 
-    # 画面表示用のメッセージ
     if 'system_msg' not in st.session_state:
         st.session_state['system_msg'] = ""
 
 def calculate_weighted_average(current_qty, current_avg, add_qty, add_price):
-    """
-    【ジェシカ監修】加重移動平均の計算ロジック
-    (現在の保有総額 + 今回の購入総額) ÷ (現在の保有数 + 今回の購入数)
-    """
+    """加重移動平均（買い増し用）"""
     total_cost = (current_qty * current_avg) + (add_qty * add_price)
     total_qty = current_qty + add_qty
-    
-    if total_qty == 0:
-        return 0.0
-    
-    # 小数点以下2桁で丸める（円単位ならround(x)でもOK）
+    if total_qty == 0: return 0.0
     return round(total_cost / total_qty, 2)
 
 def add_stock_callback():
-    """
-    ボタンが押された時に実行される処理（コールバック）
-    ここで計算と入力欄のリセットを行うことでエラーを回避する
-    """
-    # 入力値の取得
+    """売買実行ボタンの処理"""
+    # 入力値取得
     input_date = st.session_state.input_date
+    trade_type = st.session_state.input_type # 買い or 売り
     code = st.session_state.input_code
     qty = st.session_state.input_qty
     price = st.session_state.input_price
-
-    # バリデーション（入力チェック）
-    if not code or qty <= 0 or price < 0:
-        st.session_state['system_msg'] = "⚠️ エラー: コード、数量、単価を正しく入力してね。"
-        return
-
+    
     portfolio = st.session_state['portfolio']
 
-    # --- 計算ロジック ---
-    if code in portfolio:
-        # すでに持っている銘柄なら「移動平均」で単価更新
-        current_data = portfolio[code]
-        new_avg = calculate_weighted_average(
-            current_data['qty'], 
-            current_data['avg_price'], 
-            qty, 
-            price
-        )
-        # データを更新
-        portfolio[code]['qty'] += qty
-        portfolio[code]['avg_price'] = new_avg
-        action_type = "買い増し"
-    else:
-        # 新規銘柄ならそのまま登録
-        portfolio[code] = {
-            'qty': qty,
-            'avg_price': price
-        }
-        action_type = "新規買付"
+    # --- バリデーション ---
+    if not code or qty <= 0 or price < 0:
+        st.session_state['system_msg'] = "⚠️ コード、数量、単価を正しく入れてね。"
+        return
 
-    # ログに追加
+    # --- 処理分岐 ---
+    
+    # A. 新規・買い増しの場合
+    if trade_type == "買い":
+        if code in portfolio:
+            current = portfolio[code]
+            new_avg = calculate_weighted_average(current['qty'], current['avg_price'], qty, price)
+            portfolio[code]['qty'] += qty
+            portfolio[code]['avg_price'] = new_avg
+            action = "買い増し"
+            pl_display = 0 # 買いの時は損益発生なし
+        else:
+            portfolio[code] = {'qty': qty, 'avg_price': price, 'realized_pl': 0}
+            new_avg = price
+            action = "新規買付"
+            pl_display = 0
+            
+        msg = f"✅ {code} を {qty}株 買いました（平均単価: {new_avg}円）"
+
+    # B. 売り（恩株化・利確・損切り）の場合
+    elif trade_type == "売り":
+        if code not in portfolio or portfolio[code]['qty'] < qty:
+            st.session_state['system_msg'] = "⚠️ エラー: 保有していない、または株数が足りません！"
+            return
+        
+        current = portfolio[code]
+        
+        # ★重要ロジック：売却益の計算（元本回収額）
+        # (売値 - 平均取得単価) * 株数
+        profit_loss = (price - current['avg_price']) * qty
+        
+        # ポートフォリオ更新
+        portfolio[code]['qty'] -= qty
+        portfolio[code]['realized_pl'] += profit_loss # 累計損益に加算
+        
+        # もし全株売却したらリストから消す？（今回は履歴に残すため残高0で維持する設計にします）
+        
+        action = "売却"
+        pl_display = profit_loss
+        msg = f"📉 {code} を {qty}株 売却しました。確定損益: {int(profit_loss):,}円"
+
+    # --- ログ保存 ---
     st.session_state['trade_log'].append({
         '日付': input_date,
-        '区分': action_type,
+        '区分': action,
         'コード': code,
         '数量': qty,
-        '取得単価': price, # その時の約定単価
-        '平均単価変動': portfolio[code]['avg_price'] # 計算後の平均単価
+        '約定単価': price,
+        '平均単価': portfolio[code]['avg_price'], # 売りでは変動しない！
+        '確定損益': pl_display
     })
 
-    # メッセージ更新
-    st.session_state['system_msg'] = f"✅ {code} を {qty}株 追加しました！（平均単価: {portfolio[code]['avg_price']}円）"
+    st.session_state['system_msg'] = msg
 
-    # ★ここが重要：入力欄のリセット
-    # keyに紐付いたsession_stateを直接書き換えても、コールバック内ならエラーにならない
+    # 入力リセット
     st.session_state.input_code = ""
     st.session_state.input_qty = 0
     st.session_state.input_price = 0.0
 
-# --- 2. メイン画面構築 ---
+# --- 2. 画面表示 ---
 
 def main():
     st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
     init_session_state()
 
     st.title("J_Phantom_Gear ⚙️")
+    st.caption("恩株マネジメントシステム")
     st.markdown("---")
 
-    # --- 入力エリア ---
-    st.header("📝 新規買付入力")
-    
-    # 成功/エラーメッセージの表示
+    # メッセージ表示
     if st.session_state['system_msg']:
         if "⚠️" in st.session_state['system_msg']:
             st.error(st.session_state['system_msg'])
         else:
             st.success(st.session_state['system_msg'])
-        # 一度表示したらクリアしたい場合はここで空にする処理を入れるが、今回は残す
 
+    # --- 入力フォーム ---
     with st.container():
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.date_input("買付日", datetime.today(), key="input_date")
-            st.text_input("証券コード (例: 7203)", key="input_code")
-            
-        with col2:
-            st.number_input("数量 (株)", min_value=0, step=100, key="input_qty")
-            st.number_input("取得単価 (円)", min_value=0.0, step=1.0, format="%.2f", key="input_price")
+        st.subheader("📝 取引入力")
+        col_type, col_date, col_code = st.columns([1, 1, 2])
+        col_qty, col_price, col_btn = st.columns([1, 1, 1])
 
-        # コールバックを使ったボタン
-        st.button("保有リストに追加", on_click=add_stock_callback, type="primary")
+        with col_type:
+            # ここで「買い」「売り」を選択
+            st.radio("取引区分", ["買い", "売り"], horizontal=True, key="input_type")
+        with col_date:
+            st.date_input("取引日", datetime.today(), key="input_date")
+        with col_code:
+            st.text_input("証券コード", key="input_code")
+            
+        with col_qty:
+            st.number_input("数量", min_value=0, step=100, key="input_qty")
+        with col_price:
+            st.number_input("約定単価", min_value=0.0, step=1.0, key="input_price")
+        with col_btn:
+            st.write("") # スペース調整
+            st.write("")
+            st.button("取引実行", on_click=add_stock_callback, type="primary", use_container_width=True)
 
     st.markdown("---")
 
-    # --- 結果表示エリア ---
-    col_res1, col_res2 = st.columns([1, 1])
+    # --- 結果表示 ---
+    col1, col2 = st.columns([3, 2])
 
-    with col_res1:
-        st.subheader("📊 現在の保有ポートフォリオ")
+    with col1:
+        st.subheader("📊 ポートフォリオ＆恩株状況")
         if st.session_state['portfolio']:
-            # 辞書をDataFrameに変換して表示
-            df_port = pd.DataFrame.from_dict(st.session_state['portfolio'], orient='index')
-            df_port.index.name = 'コード'
-            st.dataframe(df_port.style.format({'avg_price': '{:.2f}', 'qty': '{:,}'}), use_container_width=True)
+            # データ加工
+            data = []
+            for code, val in st.session_state['portfolio'].items():
+                # 恩株判定：保有があり、かつ累計損益がプラス（簡易判定）
+                onkabu_status = "✨恩株達成" if (val['realized_pl'] > 0 and val['qty'] > 0) else "-"
+                
+                data.append({
+                    'コード': code,
+                    '保有株数': val['qty'],
+                    '平均取得単価': f"{val['avg_price']:.2f}",
+                    '累計確定損益': f"{int(val['realized_pl']):,}", # これが元本回収の目安
+                    'ステータス': onkabu_status
+                })
+            
+            df_port = pd.DataFrame(data)
+            st.dataframe(df_port, use_container_width=True)
         else:
-            st.info("まだ保有株はありません。")
+            st.info("保有なし")
 
-    with col_res2:
-        st.subheader("📜 取引履歴ログ")
+    with col2:
+        st.subheader("📜 取引履歴")
         if st.session_state['trade_log']:
             df_log = pd.DataFrame(st.session_state['trade_log'])
-            # 新しい順に表示
+            # カラム順序調整
+            df_log = df_log[['日付', '区分', 'コード', '数量', '約定単価', '確定損益']]
             st.dataframe(df_log.iloc[::-1], use_container_width=True)
-        else:
-            st.text("履歴なし")
 
 if __name__ == "__main__":
     main()
