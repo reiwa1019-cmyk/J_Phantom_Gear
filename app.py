@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import os
 import uuid
+import unicodedata
 from datetime import datetime
 
 # --- 設定 ---
@@ -61,15 +62,21 @@ with tab1:
         col1, col2 = st.columns(2)
         with col1:
             input_date = st.date_input("買付日", datetime.now())
-            code = st.text_input("証券コード (例: 7711)", max_chars=4)
+            # ここを変更：ラベルを分かりやすく
+            code_input = st.text_input("証券コード (例: 7203 トヨタ)", max_chars=10, help="半角・全角どちらでもOKです")
         with col2:
             qty = st.number_input("数量 (株)", min_value=100, step=100)
             price = st.number_input("取得単価 (円)", min_value=0.0, step=0.1, format="%.1f")
         
         submitted = st.form_submit_button("保有リストに追加")
         
-        if submitted and code:
+        if submitted and code_input:
+            # ここで全角→半角変換 (正規化)
+            code = unicodedata.normalize('NFKC', code_input)
+            
+            # 数字以外が入っていたら除去するなどの安全策も入れたほうがいいが、まずはシンプルに変換のみ
             stock_name = get_stock_name_jp(code)
+            
             df = load_data()
             new_id = str(uuid.uuid4())
             
@@ -90,7 +97,19 @@ with tab1:
             }
             df = pd.concat([df, pd.DataFrame([new_data])], ignore_index=True)
             save_data(df)
-            st.success(f"✅ {stock_name} ({qty}株) を保有リストに追加したよ！")
+            st.success(f"✅ {stock_name} ({qty}株) をリストに追加したよ！")
+
+    # ▼ ここに追加！「保有リスト」を画面下に見せる処理
+    st.divider()
+    st.markdown("### 📊 現在の保有リスト")
+    df_show = load_data()
+    holding_df = df_show[df_show['ステータス'] == '保有中']
+    
+    if not holding_df.empty:
+        # 見やすいようにカラムを絞って表示
+        st.dataframe(holding_df[['買付日', '証券コード', '銘柄名', '数量', '取得単価', '取得額']], use_container_width=True)
+    else:
+        st.info("現在、保有している株はありません。上のフォームから追加してね。")
 
 # --- タブ2：決済 ---
 with tab2:
