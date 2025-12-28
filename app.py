@@ -279,7 +279,8 @@ def main():
 
     # ▼ 入力エリア
     with st.container():
-        st.subheader("🔵 買い注文 (Buy)")
+        # 色変更: 青(🔵) → 赤(🔴)
+        st.subheader("🔴 買い注文 (Buy)")
         c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
@@ -297,7 +298,8 @@ def main():
     st.write("") 
 
     with st.container():
-        st.subheader("🔴 売り注文 (Sell)")
+        # 色変更: 赤(🔴) → 青(🔵)
+        st.subheader("🔵 売り注文 (Sell)")
         c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
