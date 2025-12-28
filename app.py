@@ -3,9 +3,32 @@ import pandas as pd
 from datetime import datetime
 from github import Github
 import io
+import time
+
+# --- 0. 簡易セキュリティ（ドアチェーン機能） ---
+def check_password():
+    """パスワード認証機能"""
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+
+    if st.session_state['logged_in']:
+        return True
+
+    # ログイン画面
+    st.title("🔒 J_Phantom_Gear")
+    password = st.text_input("パスワードを入力してね", type="password")
+    
+    if st.button("ログイン"):
+        # Secretsに設定したパスワードと照合
+        if password == st.secrets["general"]["APP_PASSWORD"]:
+            st.session_state['logged_in'] = True
+            st.rerun() # 画面をリロードしてメイン画面へ
+        else:
+            st.error("パスワードが違います")
+    
+    return False
 
 # --- 設定 ---
-# requirements.txt に "PyGithub" が必要
 
 def get_github_repo():
     """GitHubリポジトリへの接続"""
@@ -120,7 +143,7 @@ def add_stock_callback():
     
     st.session_state['system_msg'] = msg
     
-    # ★GitHub保存実行
+    # GitHub保存実行
     save_data_to_cloud()
 
     # 入力クリア
@@ -145,6 +168,11 @@ def save_data_to_cloud():
 
 def main():
     st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
+    
+    # ★ここに門番を配置！パスワードが違えばここでストップ
+    if not check_password():
+        return
+
     init_session_state()
 
     st.title("J_Phantom_Gear ⚙️")
