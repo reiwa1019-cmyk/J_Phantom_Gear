@@ -27,7 +27,7 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 1. 高速化関数群 (Core Logic) ---
+# --- 1. 高速化関数群 ---
 
 def get_github_repo():
     try:
@@ -38,15 +38,12 @@ def get_github_repo():
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_name_cached(code):
-    """銘柄名取得（二段構え）"""
+    """銘柄名取得（キャッシュ付き）"""
     code = str(code).strip()
     try:
         ticker = yf.Ticker(f"{code}.T")
-        # まず正式名称、ダメなら略称をトライ
         name = ticker.info.get('longName')
-        if not name:
-            name = ticker.info.get('shortName')
-        
+        if not name: name = ticker.info.get('shortName')
         return name if name else f"コード({code})"
     except:
         return f"コード({code})"
@@ -95,11 +92,10 @@ def save_to_github_fast(filename, df):
     except Exception as e:
         try:
             repo.create_file(filename, f"Create {filename}", content)
-        except Exception as create_err:
-            st.error(f"Save Error: {create_err}")
+        except: pass
 
 def recalculate_all(logs):
-    """全履歴からのリプレイ再計算"""
+    """全履歴リプレイ再計算"""
     sorted_logs = sorted(logs, key=lambda x: x['日付'])
     portfolio = {}
     processed_logs = []
@@ -110,19 +106,13 @@ def recalculate_all(logs):
         price = float(log['約定単価'])
         trade_type = log['区分']
         
-        # 名前解決ロジック（既存の名前を優先して維持）
+        # 名前解決
         log_name = log.get('銘柄名')
         current_name_in_port = portfolio.get(code, {}).get('name')
         
-        # 1. ログにちゃんとした名前があるならそれを使う
-        # 2. ポートフォリオに既に名前があるならそれを使う
-        # 3. どっちもなければコード名
-        if log_name and "コード(" not in str(log_name):
-            final_name = log_name
-        elif current_name_in_port and "コード(" not in str(current_name_in_port):
-            final_name = current_name_in_port
-        else:
-            final_name = str(log_name) if log_name else f"コード({code})"
+        if log_name and "コード(" not in str(log_name): final_name = log_name
+        elif current_name_in_port and "コード(" not in str(current_name_in_port): final_name = current_name_in_port
+        else: final_name = str(log_name) if log_name else f"コード({code})"
 
         if trade_type in ["買い", "新規買付", "買い増し"]:
             if code not in portfolio:
@@ -142,10 +132,7 @@ def recalculate_all(logs):
                 profit = (price - cur['avg_price']) * qty
                 portfolio[code]['qty'] = max(0, cur['qty'] - qty)
                 portfolio[code]['realized_pl'] += profit
-                # 名前を維持
-                if final_name != f"コード({code})":
-                    portfolio[code]['name'] = final_name
-                    
+                if final_name != f"コード({code})": portfolio[code]['name'] = final_name
                 log.update({'平均単価': cur['avg_price'], '確定損益': profit, '銘柄名': portfolio[code]['name']})
         
         processed_logs.append(log)
@@ -153,14 +140,14 @@ def recalculate_all(logs):
 
 # --- 2. イベントハンドラ ---
 
-def handle_add_transaction():
-    s = st.session_state
-    if not s.input_code or s.input_qty <= 0: return
+def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
+    """取引実行共通ロジック"""
+    if not code_val or qty_val <= 0: return
 
-    code = s.input_code.strip()
+    s = st.session_state
+    code = str(code_val).strip()
 
     with st.spinner('🚀 処理中...'):
-        # 既存の名前があればそれを使う、なければ取得
         current_port_name = s.portfolio.get(code, {}).get('name')
         if current_port_name and "コード(" not in current_port_name:
             name = current_port_name
@@ -168,12 +155,12 @@ def handle_add_transaction():
             name = get_stock_name_cached(code)
         
         new_log = {
-            '日付': s.input_date,
-            '区分': "買い" if s.input_type == "買い" else "売り",
+            '日付': date_val,
+            '区分': tx_type,
             '証券コード': code,
             '銘柄名': name,
-            '数量': s.input_qty,
-            '約定単価': s.input_price,
+            '数量': qty_val,
+            '約定単価': price_val,
             '平均単価': 0, '確定損益': 0
         }
         
@@ -186,23 +173,27 @@ def handle_add_transaction():
         s.portfolio = new_port
         s.trade_log = new_logs
         
-        s.input_code = ""
-        s.input_qty = 0
-        s.input_price = 0.0
-        
-        if "コード(" in name:
-            st.toast(f"⚠️ 名前が取得できませんでした。履歴表で直接修正できます！")
-        else:
-            st.toast(f"✅ {name} 反映完了")
+        st.toast(f"✅ {name} {tx_type} 反映完了")
+
+def handle_buy():
+    s = st.session_state
+    execute_transaction("買い", s.buy_date, s.buy_code, s.buy_qty, s.buy_price)
+    s.buy_code = ""
+    s.buy_qty = 0
+    s.buy_price = 0.0
+
+def handle_sell():
+    s = st.session_state
+    execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price)
+    s.sell_code = ""
+    s.sell_qty = 0
+    s.sell_price = 0.0
 
 def handle_save_changes(edited_df):
-    """編集・削除保存時の処理"""
-    with st.spinner('💾 修正・削除を反映して再計算中...'):
-        # 削除チェックが入っていない行だけを残す
+    with st.spinner('💾 再計算中...'):
         if '削除' in edited_df.columns:
             valid_rows = edited_df[edited_df['削除'] == False].drop(columns=['削除'])
-        else:
-            valid_rows = edited_df
+        else: valid_rows = edited_df
 
         logs = valid_rows.to_dict(orient='records')
         new_port, new_logs = recalculate_all(logs)
@@ -212,7 +203,7 @@ def handle_save_changes(edited_df):
         
         st.session_state.portfolio = new_port
         st.session_state.trade_log = new_logs
-        st.success("修正・削除を完了しました！")
+        st.success("完了！")
         time.sleep(1)
         st.rerun()
 
@@ -220,7 +211,7 @@ def handle_save_changes(edited_df):
 
 def main():
     if 'portfolio' not in st.session_state:
-        with st.spinner('☁️ データを取得中...'):
+        with st.spinner('☁️ 起動中...'):
             st.session_state.portfolio = load_csv_from_github('portfolio.csv')
             st.session_state.trade_log = load_csv_from_github('trade_log.csv')
 
@@ -228,19 +219,33 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    # ▼ 入力エリア
-    with st.expander("📝 新規取引入力", expanded=True):
-        c1, c2, c3, c4, c5, c6 = st.columns([1, 1.2, 1.2, 1, 1, 1])
-        with c1: st.radio("Type", ["買い", "売り"], key="input_type", label_visibility="collapsed")
-        with c2: st.date_input("Date", date.today(), key="input_date", label_visibility="collapsed")
-        with c3: st.text_input("Code", placeholder="証券コード", key="input_code", label_visibility="collapsed")
-        with c4: st.number_input("Qty", step=100, placeholder="数量", key="input_qty", label_visibility="collapsed")
-        with c5: st.number_input("Price", step=1.0, placeholder="単価", key="input_price", label_visibility="collapsed")
-        with c6: st.button("実行", on_click=handle_add_transaction, type="primary", use_container_width=True)
+    # ▼ 入力エリア（上下分離）
+    
+    # 🔵 買い入力
+    with st.container():
+        st.subheader("🔵 買い注文 (Buy)")
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
+        with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
+        with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
+        with c3: st.number_input("数量", step=100, placeholder="数量", key="buy_qty", label_visibility="collapsed")
+        with c4: st.number_input("単価", step=1.0, placeholder="単価", key="buy_price", label_visibility="collapsed")
+        with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
+
+    st.write("") # スペース
+
+    # 🔴 売り入力
+    with st.container():
+        st.subheader("🔴 売り注文 (Sell)")
+        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
+        with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
+        with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
+        with c3: st.number_input("数量", step=100, placeholder="数量", key="sell_qty", label_visibility="collapsed")
+        with c4: st.number_input("単価", step=1.0, placeholder="単価", key="sell_price", label_visibility="collapsed")
+        with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
 
     st.markdown("---")
 
-    # ▼ ポートフォリオ表示
+    # ▼ ポートフォリオ
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state.portfolio:
         rows = []
@@ -249,16 +254,12 @@ def main():
             
             cost = v['qty'] * v['avg_price']
             is_onkabu = v['realized_pl'] >= cost
-            
             status = "🏆完全恩株" if is_onkabu else f"あと{int(cost - v['realized_pl']):,}円"
             
             rows.append({
-                '証券コード': code,
-                '銘柄名': v.get('name', '-'),
-                '保有株数': v['qty'],
-                '平均取得単価': f"{v['avg_price']:,.0f}",
-                '現在保有コスト': f"{int(cost):,}",
-                '累計確定利益': f"{int(v['realized_pl']):,}",
+                '証券コード': code, '銘柄名': v.get('name', '-'),
+                '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
+                '現在保有コスト': f"{int(cost):,}", '累計確定利益': f"{int(v['realized_pl']):,}",
                 'ステータス': status
             })
         
@@ -266,46 +267,79 @@ def main():
             df = pd.DataFrame(rows).sort_values('証券コード')
             df.index = range(1, len(df) + 1)
             st.dataframe(df, use_container_width=True)
-        else:
-            st.info("現在保有している銘柄はありません")
-    else:
-        st.info("データがありません")
+        else: st.info("保有なし")
+    else: st.info("データなし")
 
     st.write("")
 
     # ▼ 履歴（削除機能付き）
-    st.subheader("📜 全取引履歴（編集・削除）")
-    st.caption("※削除したい行の左端にある「削除」にチェックを入れて、下の保存ボタンを押してください。銘柄名が出ない場合は、ここで直接入力して修正できます！")
-    
+    st.subheader("📜 全取引履歴")
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
-        
-        # 削除用カラムを先頭に追加（既存の削除カラムがあれば避ける）
-        if "削除" not in df_log.columns:
-            df_log.insert(0, "削除", False)
-        else:
-            df_log["削除"] = False # 初期化
+        if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
+        else: df_log["削除"] = False
         
         edited_df = st.data_editor(
-            df_log,
-            num_rows="dynamic",
+            df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
             column_config={
-                "削除": st.column_config.CheckboxColumn("削除", help="チェックして保存すると削除されます", width="small"),
+                "削除": st.column_config.CheckboxColumn("削除", width="small"),
                 "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
-                "区分": st.column_config.SelectboxColumn("区分", options=["買い", "売り"]),
                 "数量": st.column_config.NumberColumn("数量", min_value=0),
                 "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
-                "証券コード": st.column_config.TextColumn("証券コード"),
-                "銘柄名": st.column_config.TextColumn("銘柄名", help="自動取得できない場合はここを手入力で修正してください"),
                 "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
                 "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
-            },
-            use_container_width=True,
-            hide_index=True 
+            }
         )
-
-        if st.button("💾 修正・削除を反映する", type="secondary", use_container_width=True):
+        if st.button("💾 履歴の修正・削除を反映", type="secondary"):
             handle_save_changes(edited_df)
+    
+    st.markdown("---")
+
+    # ▼ 💰 成功報酬管理エリア（新機能！）
+    st.subheader("💰 成功報酬管理")
+    
+    # 全確定損益の合計を計算
+    total_realized_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
+    
+    # レイアウト
+    col_reward1, col_reward2 = st.columns(2)
+    
+    with col_reward1:
+        if total_realized_pl >= 0:
+            st.markdown(f"""
+            <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
+                <h3 style="color: #155724; margin:0;">🎉 成功報酬対象額</h3>
+                <h1 style="color: #155724; margin:0;">¥ {int(total_realized_pl):,}</h1>
+                <p style="margin:0;">（損失補填完了済み）</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
+                <h3 style="color: #6c757d; margin:0;">成功報酬対象額</h3>
+                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+                <p style="margin:0;">（まずは損失補填が必要です）</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+    with col_reward2:
+        if total_realized_pl < 0:
+            loss_to_cover = abs(total_realized_pl)
+            st.markdown(f"""
+            <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
+                <h3 style="color: #721c24; margin:0;">⚠️ 損失補填が必要な額</h3>
+                <h1 style="color: #721c24; margin:0;">¥ {int(loss_to_cover):,}</h1>
+                <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
+                <h3 style="color: #0c5460; margin:0;">✨ 損失補填状況</h3>
+                <h1 style="color: #0c5460; margin:0;">クリア！</h1>
+                <p style="margin:0;">（現在はプラス運用中です）</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 if __name__ == "__main__":
     main()
