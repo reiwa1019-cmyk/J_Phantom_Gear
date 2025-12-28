@@ -85,9 +85,6 @@ def load_csv_from_github(filename):
         else:
             df['証券コード'] = df['証券コード'].astype(str)
             df['日付'] = pd.to_datetime(df['日付']).dt.date
-            # Ver.16: ボーナスカラムがない場合の互換性対応
-            if 'ボーナス' not in df.columns:
-                df['ボーナス'] = False
             return df.to_dict(orient='records')
     except:
         return [] if filename == 'trade_log.csv' else {}
@@ -126,7 +123,6 @@ def recalculate_all(logs):
     for log in sorted_logs:
         code = str(log['証券コード']).strip()
         trade_type = log['区分']
-        is_bonus = log.get('ボーナス', False) # ボーナスフラグ取得
         
         if trade_type == "データ調整":
             processed_logs.append(log)
@@ -159,16 +155,7 @@ def recalculate_all(logs):
                 cur = portfolio[code]
                 profit = (price - cur['avg_price']) * qty
                 portfolio[code]['qty'] = max(0, cur['qty'] - qty)
-                
-                # ボーナスの場合はポートフォリオの累計損益には加算しない（別腹）
-                # でも「恩株達成」判定のために内部的には持っておきたいが、
-                # ここでは「損失補填」に影響させないためにPL加算を分岐する
-                
-                # ★修正: ポートフォリオ上の「累計確定利益」はあくまで「この銘柄でいくら勝ったか」なので
-                # ボーナスだろうが加算してOK。
-                # 「成功報酬計算」の時に、ボーナスフラグを見て振り分けるロジックにする。
                 portfolio[code]['realized_pl'] += profit
-                
                 if final_name != f"コード({code})": portfolio[code]['name'] = final_name
                 log.update({'平均単価': cur['avg_price'], '確定損益': profit, '銘柄名': portfolio[code]['name']})
         
@@ -177,7 +164,7 @@ def recalculate_all(logs):
 
 # --- 2. イベントハンドラ ---
 
-def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonus=False):
+def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
     s = st.session_state
     
     with st.spinner('🚀 処理中...'):
@@ -185,7 +172,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': "ADJUST",
                 '銘柄名': "📊 過去損益調整引継", '数量': 0, '約定単価': 0, '平均単価': 0,
-                '確定損益': int(price_val), 'ボーナス': False
+                '確定損益': int(price_val)
             }
         else:
             if not code_val or qty_val <= 0: return
@@ -193,8 +180,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
             name, _, _, _ = get_stock_info(code)
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': code, '銘柄名': name,
-                '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0,
-                'ボーナス': is_bonus # フラグ保存
+                '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0
             }
         
         s.trade_log.append(new_log)
@@ -209,21 +195,19 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
 
 def handle_buy():
     s = st.session_state
-    # 買いはボーナス関係なし
-    execute_transaction("買い", s.buy_date, s.buy_code, s.buy_qty, s.buy_price, False)
+    execute_transaction("買い", s.buy_date, s.buy_code, s.buy_qty, s.buy_price)
     s.buy_code = ""
     s.buy_price = 0.0
 
 def handle_sell():
     s = st.session_state
-    execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price, s.sell_is_bonus)
+    execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price)
     s.sell_code = ""
     s.sell_price = 0.0
-    s.sell_is_bonus = False
 
 def handle_adjust():
     s = st.session_state
-    execute_transaction("データ調整", s.adj_date, "ADJUST", 0, s.adj_amount, False)
+    execute_transaction("データ調整", s.adj_date, "ADJUST", 0, s.adj_amount)
     s.adj_amount = 0.0
 
 def handle_save_changes(edited_df):
@@ -295,10 +279,7 @@ def main():
         if sell_mode == "手入": st.session_state.sell_qty = final_sell_qty
 
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
-        with c5:
-            st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
-            # ★ボーナス用チェックボックスを追加
-            st.checkbox("🎉 恩株化（ボーナス）", key="sell_is_bonus", help="チェックすると損失補填に充当せず、即座に成功報酬対象となります")
+        with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
     
     st.write("")
 
@@ -328,7 +309,7 @@ def main():
             cost = v['qty'] * v['avg_price']
             is_onkabu = v['realized_pl'] >= cost
             
-            if is_onkabu: status_text = "🏆完全恩株達成！"
+            if is_onkabu: status_text = "👑 恩株化完了！"
             else:
                 remaining = int(cost - v['realized_pl'])
                 status_text = f"あと{remaining:,}円"
@@ -348,8 +329,9 @@ def main():
             rows.append({
                 '証券コード': code, '銘柄名': name, '現在値': f"{int(current_price):,}円",
                 '前日比': change_str, '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
-                '騰落率': pct_str, '損益': pl_str, '保有元本': f"{int(cost):,}",
-                '恩株までの距離': status_text, '累計確定利益': f"{int(v['realized_pl']):,}"
+                '騰落率': pct_str, '含み損益': pl_str, '保有元本': f"{int(cost):,}",
+                'ステータス': status_text
+                # 「累計確定利益」の列は削除しました！
             })
         
         if rows:
@@ -388,78 +370,50 @@ def main():
 
     st.write("")
 
-    # ▼ 💰 成功報酬管理 (ロジック変更)
+    # ▼ 💰 成功報酬管理
     st.subheader("💰 成功報酬管理")
     
-    if st.session_state.trade_log:
-        df_calc = pd.DataFrame(st.session_state.trade_log)
-        if 'ボーナス' not in df_calc.columns: df_calc['ボーナス'] = False
-        
-        # 通常トレードの損益（損失補填に使う）
-        normal_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
-        # ボーナストレードの利益（即報酬）
-        bonus_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
-    else:
-        normal_pl = 0
-        bonus_profit = 0
+    # シンプルに全合算
+    total_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
     
-    col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
+    col_r1, col_r2 = st.columns(2)
     
-    # 1. 損失補填状況
     with col_r1:
-        if normal_pl < 0:
-            loss = abs(normal_pl)
+        if total_pl < 0:
+            loss = abs(total_pl)
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
-                <h3 style="color: #721c24; margin:0;">⚠️ 損失補填が必要な額</h3>
+                <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
                 <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-                <p style="margin:0;">（このマイナスを埋めるまで通常報酬は発生しません）</p>
+                <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
             </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
-                <h3 style="color: #0c5460; margin:0;">✨ 通常損益</h3>
+                <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-                <p style="margin:0;">(現在: +¥{int(normal_pl):,})</p>
+                <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
             </div>""", unsafe_allow_html=True)
 
-    # 2. 通常の成功報酬
     with col_r2:
-        if normal_pl > 0:
-            normal_reward = normal_pl * 0.15
-            if normal_reward > 10000:
+        if total_pl > 0:
+            reward = total_pl * 0.15
+            if reward > 10000:
                 st.markdown(f"""
                 <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
-                    <h3 style="color: #155724; margin:0;">🎉 通常成功報酬 (15%)</h3>
-                    <h1 style="color: #155724; margin:0;">¥ {int(normal_reward):,}</h1>
+                    <h3 style="color: #155724; margin:0;">🎉 成功報酬請求額 (15%)</h3>
+                    <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
                 </div>""", unsafe_allow_html=True)
             else:
                  st.markdown(f"""
                 <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
-                    <h3 style="color: #6c757d; margin:0;">通常報酬 (1万円以下)</h3>
-                    <h1 style="color: #6c757d; margin:0;">¥ {int(normal_reward):,}</h1>
+                    <h3 style="color: #6c757d; margin:0;">成功報酬 (1万円以下)</h3>
+                    <h1 style="color: #6c757d; margin:0;">¥ {int(reward):,}</h1>
                 </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">通常成功報酬</h3>
-                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-            </div>""", unsafe_allow_html=True)
-
-    # 3. 恩株ボーナス報酬 (別枠)
-    with col_r3:
-        if bonus_profit > 0:
-            bonus_reward = bonus_profit * 0.15
-            st.markdown(f"""
-            <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
-                <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
-                <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
-                <p style="margin:0;">(対象利益: ¥{int(bonus_profit):,})</p>
-            </div>""", unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
+                <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
                 <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
             </div>""", unsafe_allow_html=True)
 
@@ -487,7 +441,7 @@ def main():
 
             with st.expander(label):
                 st.dataframe(
-                    sub_df[['日付','区分','数量','約定単価','確定損益','ボーナス']].sort_values('日付', ascending=False),
+                    sub_df[['日付','区分','数量','約定単価','確定損益']].sort_values('日付', ascending=False),
                     use_container_width=True, hide_index=True
                 )
 
@@ -495,7 +449,6 @@ def main():
         
         with st.expander("🛠️ データの修正・削除はこちら（クリックで開く）"):
             if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
-            if "ボーナス" not in df_log.columns: df_log["ボーナス"] = False
             
             edited_df = st.data_editor(
                 df_log,
@@ -503,7 +456,6 @@ def main():
                 use_container_width=True, hide_index=True,
                 column_config={
                     "削除": st.column_config.CheckboxColumn("削除", width="small"),
-                    "ボーナス": st.column_config.CheckboxColumn("🎉恩株", width="small", help="チェックすると損失補填に充てず、即座に報酬計算します"),
                     "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                     "数量": st.column_config.NumberColumn("数量", min_value=0),
                     "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
