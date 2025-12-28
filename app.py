@@ -46,7 +46,7 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-@st.cache_data(ttl=300, show_spinner=False) # キャッシュ時間を短く調整
+@st.cache_data(ttl=300, show_spinner=False)
 def get_stock_info(code):
     code = str(code).strip()
     if code in ["ADJUST", "PAYMENT"]: return "システム調整", 0, 0, 0
@@ -348,9 +348,20 @@ def main():
     if st.session_state.portfolio:
         rows = []
         port_options = {}
+        
+        # プログレスバーを表示（取得状況が見えるように）
+        progress_text = "株価データ取得中..."
+        my_bar = st.progress(0, text=progress_text)
+        total_items = len(st.session_state.portfolio)
+        processed_count = 0
 
         for code, v in st.session_state.portfolio.items():
-            if v['qty'] <= 0: continue
+            if v['qty'] <= 0: 
+                processed_count += 1
+                continue
+            
+            # ★対策: サーバー負荷軽減のため1秒待機
+            time.sleep(1)
             
             name, current_price, change, pct_change = get_stock_info(code)
             port_options[code] = f"{name} ({code})"
@@ -377,7 +388,7 @@ def main():
                 change_str = "---"
                 pl_str = "---"
                 pct_str = "---"
-                unrealized_pl = 0 # 合算に影響させない
+                unrealized_pl = 0 
             else:
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
@@ -401,7 +412,13 @@ def main():
                 '騰落率': pct_str, '含み損益': pl_str, '保有元本': f"{int(cost):,}",
                 'ステータス': status_text
             })
+            
+            # プログレスバー更新
+            processed_count += 1
+            my_bar.progress(processed_count / total_items, text=f"データ取得中... ({name})")
         
+        my_bar.empty() # 完了したらバーを消す
+
         if rows:
             df = pd.DataFrame(rows).sort_values('証券コード')
             df.index = range(1, len(df) + 1)
@@ -455,7 +472,6 @@ def main():
         if total_pl < 0:
             loss = abs(total_pl)
             
-            # --- 修正: HTML表示崩れ対策 ---
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
@@ -464,9 +480,9 @@ def main():
 
             if bonus_base_profit > 0:
                 st.markdown(f"""
-                <div style="background-color: #f8d7da; padding: 10px 20px; border-radius: 10px; border: 2px solid #f5c6cb; margin-top: 10px;">
-                    <h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
-                    <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; border: 2px solid #ffeeba; margin-top: 10px;">
+                    <h5 style="color: #856404; margin:0;">📉 実質マイナス (恩株込)</h5>
+                    <h2 style="color: #856404; margin:0;">¥ {int(real_status):,}</h2>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -543,6 +559,7 @@ def main():
         past_df = load_csv_from_github('past_data.csv')
         if not isinstance(past_df, list) and not past_df.empty:
             
+            # ★ 修正: 背景色の適用ロジックを追加
             def highlight_past_data(row):
                 # 取引形態がある場合
                 if '取引形態' in row and pd.notnull(row['取引形態']):
