@@ -435,25 +435,25 @@ def main():
             real_status_html = ""
             if bonus_base_profit > 0:
                  real_status_html = f"""
-                <hr style="border-color:#f5c6cb;">
-                <h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
-                <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
-                """
+<hr style="border-color:#f5c6cb;">
+<h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
+<h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+"""
 
             st.markdown(f"""
-            <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
-                <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
-                <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-                <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
-                {real_status_html}
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
+    <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
+    <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
+    <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
+    {real_status_html}
+</div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
-            <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
-                <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
-                <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-                <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
+    <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
+    <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
+    <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
+</div>""", unsafe_allow_html=True)
 
     with col_r2:
         if total_pl > 0:
@@ -461,37 +461,37 @@ def main():
             bg_color = "#d4edda" if reward > 10000 else "#f8f9fa"
             title_text = "🎉 成功報酬請求額 (15%)" if reward > 10000 else "成功報酬 (1万円以下)"
             st.markdown(f"""
-            <div style="background-color: {bg_color}; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
-                <h3 style="color: #155724; margin:0;">{title_text}</h3>
-                <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: {bg_color}; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
+    <h3 style="color: #155724; margin:0;">{title_text}</h3>
+    <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
+</div>""", unsafe_allow_html=True)
             if reward > 10000:
                 if st.button("💸 通常報酬の支払い完了（リセット）", type="primary"):
                     handle_payment_reset(total_pl, False)
         else:
             st.markdown(f"""
-            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
-                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
+    <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
+    <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+</div>""", unsafe_allow_html=True)
 
     with col_r3:
         if bonus_base_profit > 0:
             bonus_reward = bonus_base_profit * 0.15
             st.markdown(f"""
-            <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
-                <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
-                <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
-                <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
+    <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
+    <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
+    <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
+</div>""", unsafe_allow_html=True)
             if st.button("💸 ボーナス支払い完了（リセット）"):
                 handle_payment_reset(bonus_base_profit, True)
         else:
             st.markdown(f"""
-            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
-                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-            </div>""", unsafe_allow_html=True)
+<div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
+    <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
+    <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+</div>""", unsafe_allow_html=True)
 
     st.write("")
 
