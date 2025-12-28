@@ -141,7 +141,6 @@ def recalculate_all(logs):
 # --- 2. イベントハンドラ ---
 
 def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
-    """取引実行共通ロジック"""
     if not code_val or qty_val <= 0: return
 
     s = st.session_state
@@ -179,14 +178,12 @@ def handle_buy():
     s = st.session_state
     execute_transaction("買い", s.buy_date, s.buy_code, s.buy_qty, s.buy_price)
     s.buy_code = ""
-    s.buy_qty = 0
     s.buy_price = 0.0
 
 def handle_sell():
     s = st.session_state
     execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price)
     s.sell_code = ""
-    s.sell_qty = 0
     s.sell_price = 0.0
 
 def handle_save_changes(edited_df):
@@ -219,28 +216,27 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    # ▼ 入力エリア（上下分離）
-    
-    # 🔵 買い入力
+    qty_options = list(range(100, 100100, 100))
+
+    # ▼ 入力エリア
     with st.container():
         st.subheader("🔵 買い注文 (Buy)")
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
-        with c3: st.number_input("数量", step=100, placeholder="数量", key="buy_qty", label_visibility="collapsed")
-        with c4: st.number_input("単価", step=1.0, placeholder="単価", key="buy_price", label_visibility="collapsed")
+        with c3: st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
+        with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
         with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
 
-    st.write("") # スペース
+    st.write("") 
 
-    # 🔴 売り入力
     with st.container():
         st.subheader("🔴 売り注文 (Sell)")
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
-        with c3: st.number_input("数量", step=100, placeholder="数量", key="sell_qty", label_visibility="collapsed")
-        with c4: st.number_input("単価", step=1.0, placeholder="単価", key="sell_price", label_visibility="collapsed")
+        with c3: st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
+        with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
         with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
 
     st.markdown("---")
@@ -272,7 +268,7 @@ def main():
 
     st.write("")
 
-    # ▼ 履歴（削除機能付き）
+    # ▼ 履歴
     st.subheader("📜 全取引履歴")
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
@@ -295,30 +291,42 @@ def main():
     
     st.markdown("---")
 
-    # ▼ 💰 成功報酬管理エリア（新機能！）
+    # ▼ 💰 成功報酬管理エリア (Logic Update!)
     st.subheader("💰 成功報酬管理")
     
-    # 全確定損益の合計を計算
+    # 全取引の損益合算（これが「ネットの純損益」）
     total_realized_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
     
-    # レイアウト
     col_reward1, col_reward2 = st.columns(2)
     
     with col_reward1:
-        if total_realized_pl >= 0:
-            st.markdown(f"""
-            <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
-                <h3 style="color: #155724; margin:0;">🎉 成功報酬対象額</h3>
-                <h1 style="color: #155724; margin:0;">¥ {int(total_realized_pl):,}</h1>
-                <p style="margin:0;">（損失補填完了済み）</p>
-            </div>
-            """, unsafe_allow_html=True)
+        if total_realized_pl > 0:
+            # 15%計算
+            reward_amount = total_realized_pl * 0.15
+            
+            # 条件: 1万円以下は請求できない
+            if reward_amount > 10000:
+                st.markdown(f"""
+                <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
+                    <h3 style="color: #155724; margin:0;">🎉 成功報酬請求額 (15%)</h3>
+                    <h1 style="color: #155724; margin:0;">¥ {int(reward_amount):,}</h1>
+                    <p style="margin:0; color:#555;">(対象純利益: ¥ {int(total_realized_pl):,})</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown(f"""
+                <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
+                    <h3 style="color: #6c757d; margin:0;">⚠️ 請求不可 (1万円以下)</h3>
+                    <h1 style="color: #6c757d; margin:0;">¥ {int(reward_amount):,}</h1>
+                    <p style="margin:0;">※報酬額が1万円を超えると請求対象になります</p>
+                </div>
+                """, unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">成功報酬対象額</h3>
+                <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
                 <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-                <p style="margin:0;">（まずは損失補填が必要です）</p>
+                <p style="margin:0;">（純利益が出ていないため請求なし）</p>
             </div>
             """, unsafe_allow_html=True)
 
@@ -335,9 +343,8 @@ def main():
         else:
             st.markdown(f"""
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
-                <h3 style="color: #0c5460; margin:0;">✨ 損失補填状況</h3>
-                <h1 style="color: #0c5460; margin:0;">クリア！</h1>
-                <p style="margin:0;">（現在はプラス運用中です）</p>
+                <h3 style="color: #0c5460; margin:0;">✨ 損益</h3>
+                <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
             </div>
             """, unsafe_allow_html=True)
 
