@@ -544,16 +544,12 @@ def main():
 
     st.markdown("---")
 
-    # ▼ 📜 全取引履歴（グラフ機能追加済み）
+    # ▼ 📜 全取引履歴
     st.subheader("📜 全取引履歴 (銘柄別アーカイブ)")
     
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
         
-        # 日付順にならべておく（グラフ用）
-        df_log['日付'] = pd.to_datetime(df_log['日付']).dt.date
-        df_log = df_log.sort_values('日付')
-
         unique_codes = df_log['証券コード'].unique()
         for c in unique_codes:
             sub_df = df_log[df_log['証券コード'] == c]
@@ -570,18 +566,6 @@ def main():
                 else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
 
             with st.expander(label):
-                 # ▼▼▼ 追加したグラフ描画エリア ▼▼▼
-                if c != "ADJUST":
-                    st.caption("📊 損益推移グラフ")
-                    # 確定損益が0以外のデータ（決済データ）だけ抽出してグラフ化
-                    chart_df = sub_df[sub_df['確定損益'] != 0].copy()
-                    if not chart_df.empty:
-                        # 日付をインデックスにして棒グラフを表示
-                        st.bar_chart(chart_df.set_index('日付')['確定損益'], color="#FF4B4B")
-                    else:
-                        st.caption("※決済データがまだありません")
-                # ▲▲▲ 追加エリアここまで ▲▲▲
-
                 st.dataframe(
                     sub_df[['日付','区分','数量','約定単価','確定損益','ボーナス']].sort_values('日付', ascending=False),
                     use_container_width=True, hide_index=True
@@ -594,7 +578,7 @@ def main():
             if "ボーナス" not in df_log.columns: df_log["ボーナス"] = False
             
             edited_df = st.data_editor(
-                df_log.sort_values('日付', ascending=False), # 編集しやすいように新しい順で表示
+                df_log,
                 num_rows="dynamic",
                 use_container_width=True, hide_index=True,
                 column_config={
