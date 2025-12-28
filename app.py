@@ -49,7 +49,7 @@ def get_github_repo():
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_info(code):
     code = str(code).strip()
-    if code == "ADJUST": return "過去損益調整", 0, 0, 0 # 調整用
+    if code == "ADJUST": return "過去損益調整", 0, 0, 0
     try:
         ticker = yf.Ticker(f"{code}.T")
         name = ticker.info.get('longName')
@@ -124,7 +124,6 @@ def recalculate_all(logs):
         code = str(log['証券コード']).strip()
         trade_type = log['区分']
         
-        # 調整モードの場合はポートフォリオ計算をスキップして損益だけ記録
         if trade_type == "データ調整":
             processed_logs.append(log)
             continue
@@ -170,16 +169,10 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
     
     with st.spinner('🚀 処理中...'):
         if tx_type == "データ調整":
-            # 調整用ロジック
             new_log = {
-                '日付': date_val,
-                '区分': tx_type,
-                '証券コード': "ADJUST",
-                '銘柄名': "📊 過去損益調整引継",
-                '数量': 0,
-                '約定単価': 0,
-                '平均単価': 0,
-                '確定損益': int(price_val) # 金額をそのまま損益へ
+                '日付': date_val, '区分': tx_type, '証券コード': "ADJUST",
+                '銘柄名': "📊 過去損益調整引継", '数量': 0, '約定単価': 0, '平均単価': 0,
+                '確定損益': int(price_val)
             }
         else:
             if not code_val or qty_val <= 0: return
@@ -214,7 +207,6 @@ def handle_sell():
 
 def handle_adjust():
     s = st.session_state
-    # 調整額を確定損益として渡す
     execute_transaction("データ調整", s.adj_date, "ADJUST", 0, s.adj_amount)
     s.adj_amount = 0.0
 
@@ -248,13 +240,33 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
+    # プルダウンの選択肢
+    qty_options = list(range(100, 100100, 100))
+
     # ▼ 入力エリア
     with st.container():
         st.subheader("🔵 買い注文 (Buy)")
-        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
+        c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
-        with c3: st.number_input("数量", min_value=100, step=100, key="buy_qty", label_visibility="collapsed")
+        
+        # 株数入力切り替えスイッチ
+        with c3_radio:
+            buy_mode = st.radio("入力", ["選択", "手入"], key="buy_mode", label_visibility="collapsed", horizontal=False)
+        
+        # スイッチによって表示を変える
+        with c3:
+            if buy_mode == "選択":
+                st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
+            else:
+                st.number_input("数量(手入力)", min_value=1, step=100, key="buy_qty_manual")
+                # 手入力の値をメイン変数に渡す処理（簡易化のためsession_state操作はせず、実行時に判定）
+        
+        # 実行ボタン用の値を決定
+        final_buy_qty = st.session_state.buy_qty if buy_mode == "選択" else st.session_state.get("buy_qty_manual", 0)
+        # (セッションステート書き換えハック)
+        if buy_mode == "手入": st.session_state.buy_qty = final_buy_qty
+
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
         with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
 
@@ -262,17 +274,30 @@ def main():
 
     with st.container():
         st.subheader("🔴 売り注文 (Sell)")
-        c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
+        c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
-        with c3: st.number_input("数量", min_value=100, step=100, key="sell_qty", label_visibility="collapsed")
+        
+        with c3_radio:
+            sell_mode = st.radio("入力", ["選択", "手入"], key="sell_mode", label_visibility="collapsed", horizontal=False)
+        
+        with c3:
+            if sell_mode == "選択":
+                st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
+            else:
+                st.number_input("数量(手入力)", min_value=1, step=100, key="sell_qty_manual")
+        
+        final_sell_qty = st.session_state.sell_qty if sell_mode == "選択" else st.session_state.get("sell_qty_manual", 0)
+        if sell_mode == "手入": st.session_state.sell_qty = final_sell_qty
+
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
         with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
     
     st.write("")
 
-    # ▼ データ調整エリア（新設）
-    with st.expander("⚙️ 過去の損益をまとめて調整する（スタートライン設定）"):
+    # ▼ データ調整エリア（見つかりやすいように最初から展開済み！）
+    st.markdown("### ⚙️ 過去の損益をまとめて調整する")
+    with st.container():
         st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
         c1, c2, c3 = st.columns([1.2, 2, 1])
         with c1: st.date_input("日付", date.today(), key="adj_date", label_visibility="collapsed")
