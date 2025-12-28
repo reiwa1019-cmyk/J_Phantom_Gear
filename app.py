@@ -46,22 +46,35 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False) # キャッシュ時間を短く調整
 def get_stock_info(code):
     code = str(code).strip()
     if code in ["ADJUST", "PAYMENT"]: return "システム調整", 0, 0, 0
     try:
         ticker = yf.Ticker(f"{code}.T")
+        
+        # 銘柄名取得トライ
         name = ticker.info.get('longName')
         if not name: name = ticker.info.get('shortName')
         if not name: name = f"コード({code})"
         
+        # 現在値取得（fast_infoがダメならhistoryで再トライ）
         price = ticker.fast_info.last_price
         prev_close = ticker.fast_info.previous_close
         
+        if price is None or price == 0:
+            hist = ticker.history(period="1d")
+            if not hist.empty:
+                price = hist['Close'].iloc[-1]
+                prev_close = price # 前日比は諦める
+        
+        # それでもダメなら0を返す（表示側でハンドリングする）
+        if price is None: price = 0
+        if prev_close is None: prev_close = 0
+
         change = 0
         pct_change = 0
-        if price and prev_close:
+        if price > 0 and prev_close > 0:
             change = price - prev_close
             pct_change = (change / prev_close) * 100
             
@@ -279,7 +292,6 @@ def main():
 
     # ▼ 入力エリア
     with st.container():
-        # 色変更: 青(🔵) → 赤(🔴)
         st.subheader("🔴 買い注文 (Buy)")
         c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
@@ -298,7 +310,6 @@ def main():
     st.write("") 
 
     with st.container():
-        # 色変更: 赤(🔴) → 青(🔵)
         st.subheader("🔵 売り注文 (Sell)")
         c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
@@ -346,9 +357,13 @@ def main():
 
             cost = v['qty'] * v['avg_price']
             
+            # --- 安全装置: 株価取得エラーの場合 ---
+            is_data_error = (current_price == 0)
+
             if v['avg_price'] == 0:
                 status_text = "👑 恩株 (コスト0円)"
-                total_onkabu_value += (current_price * v['qty']) 
+                if not is_data_error:
+                    total_onkabu_value += (current_price * v['qty']) 
             else:
                 is_onkabu = v['realized_pl'] >= cost
                 if is_onkabu: status_text = "🏆完全恩株達成！"
@@ -356,23 +371,32 @@ def main():
                     remaining = int(cost - v['realized_pl'])
                     status_text = f"あと{remaining:,}円"
 
-            unrealized_pl = (current_price - v['avg_price']) * v['qty']
-            calc_base_price = v.get('original_avg', v['avg_price'])
-            if calc_base_price == 0: calc_base_price = v['avg_price']
+            # 損益計算（エラー時は計算しない）
+            if is_data_error:
+                current_price_disp = "⚠️ 取得失敗"
+                change_str = "---"
+                pl_str = "---"
+                pct_str = "---"
+                unrealized_pl = 0 # 合算に影響させない
+            else:
+                current_price_disp = f"{int(current_price):,}円"
+                unrealized_pl = (current_price - v['avg_price']) * v['qty']
+                calc_base_price = v.get('original_avg', v['avg_price'])
+                if calc_base_price == 0: calc_base_price = v['avg_price']
 
-            unrealized_pct = 0.0
-            if calc_base_price > 0:
-                unrealized_pct = ((current_price - calc_base_price) / calc_base_price) * 100
-            
-            mark_change = "🔺" if change > 0 else "▼" if change < 0 else "➖"
-            change_str = f"{mark_change} {int(change)} ({pct_change:+.2f}%)"
-            mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
-            pl_str = f"{mark_pl} {int(unrealized_pl):,}"
-            mark_pct = "+" if unrealized_pct > 0 else ""
-            pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
+                unrealized_pct = 0.0
+                if calc_base_price > 0:
+                    unrealized_pct = ((current_price - calc_base_price) / calc_base_price) * 100
+                
+                mark_change = "🔺" if change > 0 else "▼" if change < 0 else "➖"
+                change_str = f"{mark_change} {int(change)} ({pct_change:+.2f}%)"
+                mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
+                pl_str = f"{mark_pl} {int(unrealized_pl):,}"
+                mark_pct = "+" if unrealized_pct > 0 else ""
+                pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
             rows.append({
-                '証券コード': code, '銘柄名': name, '現在値': f"{int(current_price):,}円",
+                '証券コード': code, '銘柄名': name, '現在値': current_price_disp,
                 '前日比': change_str, '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
                 '騰落率': pct_str, '含み損益': pl_str, '保有元本': f"{int(cost):,}",
                 'ステータス': status_text
@@ -431,25 +455,28 @@ def main():
         if total_pl < 0:
             loss = abs(total_pl)
             
-            # ★ 修正: インデントを削除して1行で記述し、HTMLとして正しく認識させる
-            # ★ 修正: プレッシャー文言（～埋めるまで発生しません）を削除
-            real_status_html = ""
-            if bonus_base_profit > 0:
-                real_status_html = f"<hr style='border-color:#f5c6cb;'><h4 style='color: #0c5460; margin:0;'>📉 実質マイナス (恩株込)</h4><h2 style='color: #0c5460; margin:0;'>¥ {int(real_status):,}</h2>"
-
+            # --- 修正: HTML表示崩れ対策 ---
             st.markdown(f"""
-<div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
-    <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
-    <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-    {real_status_html}
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
+                <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
+                <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
+            </div>""", unsafe_allow_html=True)
+
+            if bonus_base_profit > 0:
+                st.markdown(f"""
+                <div style="background-color: #f8d7da; padding: 10px 20px; border-radius: 10px; border: 2px solid #f5c6cb; margin-top: 10px;">
+                    <h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
+                    <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                </div>
+                """, unsafe_allow_html=True)
+
         else:
             st.markdown(f"""
-<div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
-    <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
-    <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-    <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
+                <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
+                <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
+                <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
+            </div>""", unsafe_allow_html=True)
 
     with col_r2:
         if total_pl > 0:
@@ -457,37 +484,37 @@ def main():
             bg_color = "#d4edda" if reward > 10000 else "#f8f9fa"
             title_text = "🎉 成功報酬請求額 (15%)" if reward > 10000 else "成功報酬 (1万円以下)"
             st.markdown(f"""
-<div style="background-color: {bg_color}; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
-    <h3 style="color: #155724; margin:0;">{title_text}</h3>
-    <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: {bg_color}; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
+                <h3 style="color: #155724; margin:0;">{title_text}</h3>
+                <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
+            </div>""", unsafe_allow_html=True)
             if reward > 10000:
                 if st.button("💸 通常報酬の支払い完了（リセット）", type="primary"):
                     handle_payment_reset(total_pl, False)
         else:
             st.markdown(f"""
-<div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-    <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
-    <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
+                <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
+                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+            </div>""", unsafe_allow_html=True)
 
     with col_r3:
         if bonus_base_profit > 0:
             bonus_reward = bonus_base_profit * 0.15
             st.markdown(f"""
-<div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
-    <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
-    <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
-    <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
+                <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
+                <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
+                <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
+            </div>""", unsafe_allow_html=True)
             if st.button("💸 ボーナス支払い完了（リセット）"):
                 handle_payment_reset(bonus_base_profit, True)
         else:
             st.markdown(f"""
-<div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-    <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
-    <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
-</div>""", unsafe_allow_html=True)
+            <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
+                <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
+                <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+            </div>""", unsafe_allow_html=True)
 
     st.write("")
 
@@ -516,10 +543,9 @@ def main():
         past_df = load_csv_from_github('past_data.csv')
         if not isinstance(past_df, list) and not past_df.empty:
             
-            # ★ 修正: 背景色の適用ロジックを追加
             def highlight_past_data(row):
                 # 取引形態がある場合
-                if '取引形態' in row:
+                if '取引形態' in row and pd.notnull(row['取引形態']):
                     val = str(row['取引形態'])
                     if '利確' in val:
                         return ['background-color: #ffe6e6; color: black'] * len(row) # 薄いピンク
@@ -527,7 +553,7 @@ def main():
                         return ['background-color: #e6f2ff; color: black'] * len(row) # 薄い青
                 
                 # なければ損益で判断
-                if '損益' in row:
+                if '損益' in row and pd.notnull(row['損益']):
                     try:
                         pl = float(row['損益'])
                         if pl > 0:
@@ -544,12 +570,16 @@ def main():
 
     st.markdown("---")
 
-    # ▼ 📜 全取引履歴
+    # ▼ 📜 全取引履歴（グラフ機能付き）
     st.subheader("📜 全取引履歴 (銘柄別アーカイブ)")
     
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
         
+        # 日付順にならべておく（グラフ用）
+        df_log['日付'] = pd.to_datetime(df_log['日付']).dt.date
+        df_log = df_log.sort_values('日付')
+
         unique_codes = df_log['証券コード'].unique()
         for c in unique_codes:
             sub_df = df_log[df_log['証券コード'] == c]
@@ -566,6 +596,18 @@ def main():
                 else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
 
             with st.expander(label):
+                 # ▼▼▼ グラフ描画エリア ▼▼▼
+                if c != "ADJUST":
+                    st.caption("📊 損益推移グラフ")
+                    # 確定損益が0以外のデータ（決済データ）だけ抽出してグラフ化
+                    chart_df = sub_df[sub_df['確定損益'] != 0].copy()
+                    if not chart_df.empty:
+                        # 日付をインデックスにして棒グラフを表示
+                        st.bar_chart(chart_df.set_index('日付')['確定損益'], color="#FF4B4B")
+                    else:
+                        st.caption("※決済データがまだありません")
+                # ▲▲▲ 追加エリアここまで ▲▲▲
+
                 st.dataframe(
                     sub_df[['日付','区分','数量','約定単価','確定損益','ボーナス']].sort_values('日付', ascending=False),
                     use_container_width=True, hide_index=True
@@ -578,7 +620,7 @@ def main():
             if "ボーナス" not in df_log.columns: df_log["ボーナス"] = False
             
             edited_df = st.data_editor(
-                df_log,
+                df_log.sort_values('日付', ascending=False),
                 num_rows="dynamic",
                 use_container_width=True, hide_index=True,
                 column_config={
