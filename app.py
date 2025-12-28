@@ -1,20 +1,18 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 from github import Github
 import io
-import yfinance as yf # 株価情報の取得用
+import yfinance as yf
 
 # --- 0. 簡易セキュリティ ---
 def check_password():
-    """パスワード認証機能"""
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
 
     if st.session_state['logged_in']:
         return True
 
-    # シンプルな表示に変更
     st.markdown("### 🔒 PASS")
     password = st.text_input("", type="password", label_visibility="collapsed")
     
@@ -24,10 +22,9 @@ def check_password():
             st.rerun()
         else:
             st.error("Access Denied")
-    
     return False
 
-# --- 設定・GitHub接続 ---
+# --- GitHub接続 ---
 def get_github_repo():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -51,7 +48,9 @@ def load_csv_from_github(filename):
             df['Code'] = df['Code'].astype(str)
             return df.set_index('Code').to_dict(orient='index')
         else:
-            df['コード'] = df['コード'].astype(str)
+            df['証券コード'] = df['証券コード'].astype(str)
+            # 日付型変換
+            df['日付'] = pd.to_datetime(df['日付']).dt.date
             return df.to_dict(orient='records')
     except:
         return {} if filename == 'portfolio.csv' else []
@@ -64,7 +63,6 @@ def save_to_github(filename, df):
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
         content = csv_buffer.getvalue()
-        
         try:
             file = repo.get_contents(filename)
             repo.update_file(filename, f"Update {filename}", content, file.sha)
@@ -74,101 +72,123 @@ def save_to_github(filename, df):
         st.error(f"Save Failed: {e}")
 
 # --- ロジック ---
-
 def get_stock_name(code):
-    """証券コードから銘柄名を取得する関数"""
     try:
-        # 日本株の場合は .T をつける
         ticker = yf.Ticker(f"{code}.T")
-        info = ticker.info
-        return info.get('longName', '名称不明')
+        return ticker.info.get('longName', '名称不明')
     except:
         return "名称不明"
 
-def calculate_weighted_average(current_qty, current_avg, add_qty, add_price):
-    total_cost = (current_qty * current_avg) + (add_qty * add_price)
-    total_qty = current_qty + add_qty
-    if total_qty == 0: return 0.0
-    return round(total_cost / total_qty, 2)
+def recalculate_all(logs):
+    """
+    全履歴データからポートフォリオを「リプレイ（再計算）」する関数
+    これにより、過去データの修正が正しく現在に反映される
+    """
+    # 日付順（古い順）にソート
+    sorted_logs = sorted(logs, key=lambda x: x['日付'])
+    
+    portfolio = {}
+    processed_logs = []
+
+    for log in sorted_logs:
+        code = str(log['証券コード'])
+        qty = int(log['数量'])
+        price = float(log['約定単価'])
+        trade_type = log['区分']
+        name = log.get('銘柄名', '名称不明')
+
+        # 名前情報の補完（なければ取得はしない、重くなるから）
+        
+        if trade_type == "買い" or trade_type == "新規買付" or trade_type == "買い増し":
+            if code not in portfolio:
+                portfolio[code] = {'name': name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0}
+            
+            # 加重平均計算
+            current = portfolio[code]
+            total_cost = (current['qty'] * current['avg_price']) + (qty * price)
+            total_qty = current['qty'] + qty
+            new_avg = round(total_cost / total_qty, 2) if total_qty > 0 else 0.0
+            
+            portfolio[code]['qty'] = total_qty
+            portfolio[code]['avg_price'] = new_avg
+            portfolio[code]['name'] = name # 名前更新
+            
+            # ログにもその時点の平均単価を記録（修正）
+            log['平均単価'] = new_avg
+            log['確定損益'] = 0
+
+        elif trade_type == "売り" or trade_type == "売却":
+            if code in portfolio:
+                current = portfolio[code]
+                # 利益計算
+                profit = (price - current['avg_price']) * qty
+                
+                portfolio[code]['qty'] = max(0, current['qty'] - qty)
+                portfolio[code]['realized_pl'] += profit
+                
+                log['平均単価'] = current['avg_price']
+                log['確定損益'] = profit
+        
+        processed_logs.append(log)
+
+    return portfolio, processed_logs
 
 def add_stock_callback():
+    """新規入力時の処理"""
     input_date = st.session_state.input_date
     trade_type = st.session_state.input_type
     code = str(st.session_state.input_code)
     qty = st.session_state.input_qty
     price = st.session_state.input_price
     
-    portfolio = st.session_state['portfolio']
+    if not code or qty <= 0: return
 
-    if not code or qty <= 0 or price < 0:
-        st.session_state['system_msg'] = "⚠️ エラー: 入力内容を確認してね"
-        return
-
-    # 銘柄名の取得（既存になければ取得）
-    stock_name = "名称不明"
-    if code in portfolio and 'name' in portfolio[code]:
-         stock_name = portfolio[code]['name']
-    else:
-        with st.spinner(f"🔍 {code} の情報を取得中..."):
-            stock_name = get_stock_name(code)
-
-    if trade_type == "買い":
-        if code in portfolio:
-            current = portfolio[code]
-            new_avg = calculate_weighted_average(current['qty'], current['avg_price'], qty, price)
-            portfolio[code]['qty'] += qty
-            portfolio[code]['avg_price'] = new_avg
-            portfolio[code]['name'] = stock_name # 名前更新
-            action = "買い増し"
-            pl_display = 0
-        else:
-            portfolio[code] = {'name': stock_name, 'qty': qty, 'avg_price': price, 'realized_pl': 0}
-            new_avg = price
-            action = "新規買付"
-            pl_display = 0
-        msg = f"✅ {stock_name}({code}) {qty}株 購入"
-
-    elif trade_type == "売り":
-        if code not in portfolio or portfolio[code]['qty'] < qty:
-            st.session_state['system_msg'] = "⚠️ エラー: 保有数が足りません"
-            return
-        
-        current = portfolio[code]
-        profit = (price - current['avg_price']) * qty
-        portfolio[code]['qty'] -= qty
-        portfolio[code]['realized_pl'] += profit
-        # 名前情報の維持
-        if 'name' not in portfolio[code]: portfolio[code]['name'] = stock_name
-
-        action = "売却"
-        pl_display = profit
-        msg = f"📉 {stock_name}({code}) {qty}株 売却 (損益: {int(profit):,}円)"
-
-    st.session_state['trade_log'].append({
-        '日付': input_date, '区分': action, '証券コード': code, '銘柄名': stock_name,
-        '数量': qty, '約定単価': price, '平均単価': portfolio[code]['avg_price'],
-        '確定損益': pl_display
-    })
+    # 銘柄名取得
+    current_port = st.session_state['portfolio']
+    stock_name = current_port[code]['name'] if code in current_port else get_stock_name(code)
     
-    st.session_state['system_msg'] = msg
+    action = "買い" if trade_type == "買い" else "売り"
+    
+    # 新しいログを追加
+    new_log = {
+        '日付': input_date,
+        '区分': action,
+        '証券コード': code,
+        '銘柄名': stock_name,
+        '数量': qty,
+        '約定単価': price,
+        '平均単価': 0, # 後で計算
+        '確定損益': 0 # 後で計算
+    }
+    
+    # 既存ログに追加して、再計算を実行
+    st.session_state['trade_log'].append(new_log)
+    
+    # ★ここがミソ！全再計算してポートフォリオを作り直す
+    new_port, new_logs = recalculate_all(st.session_state['trade_log'])
+    
+    st.session_state['portfolio'] = new_port
+    st.session_state['trade_log'] = new_logs
+    
     save_data_to_cloud()
-
+    
     st.session_state.input_code = ""
     st.session_state.input_qty = 0
     st.session_state.input_price = 0.0
+    st.session_state['system_msg'] = f"✅ {stock_name} のデータを反映しました"
 
-def save_data_to_cloud():
-    if st.session_state['portfolio']:
-        df = pd.DataFrame.from_dict(st.session_state['portfolio'], orient='index')
-        df.index.name = 'Code'
-        df.reset_index(inplace=True)
-        save_to_github('portfolio.csv', df)
-
-    if st.session_state['trade_log']:
-        df = pd.DataFrame(st.session_state['trade_log'])
-        save_to_github('trade_log.csv', df)
+def save_changes(edited_df):
+    """編集されたデータで再計算して保存"""
+    # データフレームを辞書リストに変換
+    logs = edited_df.to_dict(orient='records')
     
-    st.toast("☁️ 保存完了")
+    # 再計算
+    new_port, new_logs = recalculate_all(logs)
+    
+    st.session_state['portfolio'] = new_port
+    st.session_state['trade_log'] = new_logs
+    save_data_to_cloud()
+    st.success("再計算して保存しました！")
 
 def init_session_state():
     if 'portfolio' not in st.session_state:
@@ -179,28 +199,24 @@ def init_session_state():
         st.session_state['system_msg'] = ""
 
 # --- UI ---
-
 def main():
-    st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
+    st.set_page_config(page_title="成功報酬帳簿", layout="wide")
     if not check_password(): return
-
     init_session_state()
 
     st.title("J_Phantom_Gear ⚙️")
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    if st.session_state['system_msg']:
-        if "⚠️" in st.session_state['system_msg']:
-            st.error(st.session_state['system_msg'])
-        else:
-            st.success(st.session_state['system_msg'])
+    if st.session_state.get('system_msg'):
+        st.success(st.session_state['system_msg'])
+        st.session_state['system_msg'] = ""
 
-    # 入力エリア
-    with st.container():
+    # 1. 入力エリア
+    with st.expander("📝 新規取引入力", expanded=True):
         c1, c2, c3, c4, c5, c6 = st.columns([1, 1.2, 1.2, 1, 1, 1])
         with c1: st.radio("区分", ["買い", "売り"], key="input_type", label_visibility="collapsed")
-        with c2: st.date_input("日付", datetime.today(), key="input_date", label_visibility="collapsed")
+        with c2: st.date_input("日付", date.today(), key="input_date", label_visibility="collapsed")
         with c3: st.text_input("証券コード", placeholder="証券コード", key="input_code", label_visibility="collapsed")
         with c4: st.number_input("数量", step=100, placeholder="数量", key="input_qty", label_visibility="collapsed")
         with c5: st.number_input("単価", step=1.0, placeholder="単価", key="input_price", label_visibility="collapsed")
@@ -208,31 +224,23 @@ def main():
 
     st.markdown("---")
 
-    # メイン表示エリア（上下配置に変更）
-    
-    # 1. ポートフォリオ（主役）
+    # 2. ポートフォリオ（恩株判定）
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state['portfolio']:
         data = []
         for c, v in st.session_state['portfolio'].items():
-            # 銘柄名の取得（古いデータ用対応）
-            name = v.get('name', get_stock_name(c))
-            
-            # --- 恩株判定ロジック (Ver.2) ---
-            # 累計確定利益 >= 現在の保有コスト (株数 * 平均単価)
             current_cost = v['qty'] * v['avg_price']
             is_onkabu = (v['realized_pl'] >= current_cost) and (v['qty'] > 0)
             
             status = "🏆完全恩株" if is_onkabu else "-"
-            # 恩株までの残り利益
             remaining = current_cost - v['realized_pl']
             if not is_onkabu and v['qty'] > 0:
-                status = f"あと{int(remaining):,}円回収で恩株"
+                status = f"あと{int(remaining):,}円回収"
 
-            if v['qty'] > 0: # 保有0のものは表示しない設定（好みで変更可）
+            if v['qty'] > 0: # 保有0は非表示
                 data.append({
                     '証券コード': c,
-                    '銘柄名': name,
+                    '銘柄名': v.get('name', 'Unknown'),
                     '保有株数': v['qty'],
                     '平均取得単価': f"{v['avg_price']:.2f}",
                     '現在保有コスト': f"{int(current_cost):,}",
@@ -242,33 +250,46 @@ def main():
         
         if data:
             df_port = pd.DataFrame(data)
-            # 1から始まるIndexを作成
+            # 証券コード順にソート
+            df_port = df_port.sort_values('証券コード')
             df_port.index = range(1, len(df_port) + 1)
             st.dataframe(df_port, use_container_width=True)
         else:
-            st.info("現在保有している銘柄はありません")
-    else:
-        st.info("データなし")
+            st.info("保有銘柄なし")
 
-    st.write("") # スペース
     st.write("") 
 
-    # 2. 取引履歴（詳細）
-    st.subheader("📜 全取引履歴")
+    # 3. 履歴編集エリア（ここが新機能！）
+    st.subheader("📜 全取引履歴（修正・削除可能）")
+    st.caption("※データを直接書き換えて修正できます。行を選んでDeleteキーで削除も可能。修正後は必ず「保存＆再計算」を押してね。")
+
     if st.session_state['trade_log']:
         df_log = pd.DataFrame(st.session_state['trade_log'])
-        # カラム名の整理（既存データの整合性のため）
-        if 'コード' in df_log.columns: df_log.rename(columns={'コード': '証券コード'}, inplace=True)
         
-        # 必要なカラムだけ表示
-        cols = ['日付', '区分', '証券コード', '銘柄名', '数量', '約定単価', '確定損益']
-        # データにないカラムは埋める
-        for col in cols:
-            if col not in df_log.columns: df_log[col] = "-"
-            
-        df_display = df_log[cols].iloc[::-1].reset_index(drop=True)
-        df_display.index = range(1, len(df_display) + 1)
-        st.dataframe(df_display, use_container_width=True)
+        # 編集用データフレーム設定
+        edited_df = st.data_editor(
+            df_log,
+            num_rows="dynamic", # 行の追加・削除を許可
+            column_config={
+                "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
+                "区分": st.column_config.SelectboxColumn("区分", options=["買い", "売り"]),
+                "数量": st.column_config.NumberColumn("数量", min_value=0),
+                "約定単価": st.column_config.NumberColumn("約定単価", min_value=0, format="%.0f円"),
+                "証券コード": st.column_config.TextColumn("証券コード"),
+                "銘柄名": st.column_config.TextColumn("銘柄名"),
+                # 計算結果列は編集不可にする
+                "平均単価": st.column_config.NumberColumn("平均単価 (自動計算)", disabled=True),
+                "確定損益": st.column_config.NumberColumn("確定損益 (自動計算)", disabled=True),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
+        # 変更検知ボタン
+        if st.button("💾 修正内容を保存＆再計算する"):
+            save_changes(edited_df)
+    else:
+        st.info("履歴なし")
 
 if __name__ == "__main__":
     main()
