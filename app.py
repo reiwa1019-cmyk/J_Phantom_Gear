@@ -46,19 +46,15 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-@st.cache_data(ttl=3600, show_spinner=False) # 株価などの情報は1時間キャッシュ
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_info(code):
-    """銘柄名と現在株価情報をまとめて取得"""
     code = str(code).strip()
     try:
         ticker = yf.Ticker(f"{code}.T")
-        
-        # 名前取得
         name = ticker.info.get('longName')
         if not name: name = ticker.info.get('shortName')
         if not name: name = f"コード({code})"
-
-        # 株価情報取得 (fast_infoを使用)
+        
         price = ticker.fast_info.last_price
         prev_close = ticker.fast_info.previous_close
         
@@ -129,7 +125,6 @@ def recalculate_all(logs):
         price = float(log['約定単価'])
         trade_type = log['区分']
         
-        # ログにある名前情報を優先（表示速度のため）
         log_name = log.get('銘柄名')
         current_name_in_port = portfolio.get(code, {}).get('name')
         
@@ -170,7 +165,6 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
     code = str(code_val).strip()
 
     with st.spinner('🚀 処理中...'):
-        # 最新の名前を取得して保存
         name, _, _, _ = get_stock_info(code)
         
         new_log = {
@@ -260,33 +254,27 @@ def main():
 
     st.markdown("---")
 
-    # ▼ ポートフォリオ (株価情報 & 新レイアウト)
+    # ▼ ポートフォリオ
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state.portfolio:
         rows = []
         port_options = {}
 
-        # ポートフォリオの一覧作成
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            # ここで株価情報を取得！
             name, current_price, change, pct_change = get_stock_info(code)
             
             port_options[code] = f"{name} ({code})"
 
-            # 計算
             cost = v['qty'] * v['avg_price']
             is_onkabu = v['realized_pl'] >= cost
             
-            # ステータスの言葉を「恩株までの距離」に変更
-            if is_onkabu:
-                status_text = "🏆完全恩株達成！"
+            if is_onkabu: status_text = "🏆完全恩株達成！"
             else:
                 remaining = int(cost - v['realized_pl'])
                 status_text = f"あと{remaining:,}円"
 
-            # 騰落率の装飾 (プラスなら赤、マイナスなら緑... は分かりにくいので矢印で)
             mark = "🔺" if change > 0 else "▼" if change < 0 else "➖"
             change_str = f"{mark} {int(change)} ({pct_change:+.2f}%)"
 
@@ -297,9 +285,9 @@ def main():
                 '前日比': change_str,
                 '保有株数': v['qty'], 
                 '平均取得単価': f"{v['avg_price']:,.0f}",
-                '保有元本': f"{int(cost):,}", # 「現在保有コスト」から変更
-                '恩株までの距離': status_text, # 「ステータス」から変更
-                '累計確定利益': f"{int(v['realized_pl']):,}" # 一番右へ移動
+                '保有元本': f"{int(cost):,}",
+                '恩株までの距離': status_text,
+                '累計確定利益': f"{int(v['realized_pl']):,}"
             })
         
         if rows:
@@ -307,7 +295,6 @@ def main():
             df.index = range(1, len(df) + 1)
             st.dataframe(df, use_container_width=True)
             
-            # 恩株シミュレーター
             with st.expander("📈 恩株シミュレーター", expanded=False):
                 st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
                 selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
@@ -401,7 +388,14 @@ def main():
             name_disp = sub_df.iloc[0]['銘柄名']
             sub_pl = sub_df['確定損益'].sum()
             
-            label = f"📁 {name_disp} ({c}) | 累計損益: ¥{int(sub_pl):,}"
+            # ★ここで色分け（赤：プラス、青：マイナス）
+            if sub_pl > 0:
+                label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
+            elif sub_pl < 0:
+                label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
+            else:
+                label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
+
             with st.expander(label):
                 st.dataframe(
                     sub_df[['日付','区分','数量','約定単価','確定損益']].sort_values('日付', ascending=False),
