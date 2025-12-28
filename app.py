@@ -11,32 +11,38 @@ import math
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
 
 def check_password():
-    if st.query_params.get("auth") == "granted":
-        st.session_state['logged_in'] = True
-    
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
+    if 'user_role' not in st.session_state:
+        st.session_state['user_role'] = None
 
-    if st.session_state['logged_in']:
+    if st.session_state['user_role']:
+        role_label = "管理者 (Admin)" if st.session_state['user_role'] == "admin" else "閲覧者 (Guest)"
+        st.sidebar.caption(f"ログイン中: {role_label}")
         if st.sidebar.button("ログアウト"):
-            st.session_state['logged_in'] = False
-            st.query_params.clear()
+            st.session_state['user_role'] = None
             st.rerun()
         return True
 
-    st.markdown("### 🔒 PASS")
-    password = st.text_input("", type="password", label_visibility="collapsed")
-    if st.button("ENTER"):
-        # 元のパスワード設定（APP_PASSWORD）だけを見るように戻します
-        if password == st.secrets["general"]["APP_PASSWORD"]:
-            st.session_state['logged_in'] = True
-            st.query_params["auth"] = "granted"
+    st.markdown("### 🔒 Login")
+    password = st.text_input("パスワードを入力してください", type="password")
+    
+    if st.button("ログイン"):
+        admin_pass = st.secrets["general"].get("APP_PASSWORD", "admin123")
+        viewer_pass = st.secrets["general"].get("VIEWER_PASSWORD", "guest123")
+
+        if password == admin_pass:
+            st.session_state['user_role'] = "admin"
+            st.rerun()
+        elif password == viewer_pass:
+            st.session_state['user_role'] = "viewer"
             st.rerun()
         else:
-            st.error("Access Denied")
+            st.error("パスワードが間違っています")
+    
     return False
 
 if not check_password(): st.stop()
+
+IS_ADMIN = (st.session_state['user_role'] == "admin")
 
 # --- 1. 関数群 ---
 
@@ -105,6 +111,7 @@ def load_csv_from_github(filename):
         return [] if filename == 'trade_log.csv' or filename == 'past_data.csv' else {}
 
 def save_to_github_fast(filename, df):
+    if not IS_ADMIN: return
     repo = get_github_repo()
     if not repo: return
 
@@ -198,6 +205,8 @@ def recalculate_all(logs):
 # --- 2. イベントハンドラ ---
 
 def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonus=False):
+    if not IS_ADMIN: return 
+
     s = st.session_state
     
     with st.spinner('🚀 処理中...'):
@@ -256,6 +265,8 @@ def handle_payment_reset(profit_amount, is_bonus_payment):
     execute_transaction("報酬精算", date.today(), "PAYMENT", 0, reset_amount, is_bonus_payment)
 
 def handle_save_changes(edited_df):
+    if not IS_ADMIN: return
+
     with st.spinner('💾 再計算中...'):
         if '削除' in edited_df.columns:
             valid_rows = edited_df[edited_df['削除'] == False].drop(columns=['削除'])
@@ -282,63 +293,66 @@ def main():
             st.session_state.trade_log = load_csv_from_github('trade_log.csv')
 
     st.title("J_Phantom_Gear ⚙️")
-    st.caption("成功報酬帳簿")
+    st.caption("運用レポート & 成功報酬管理")
     st.markdown("---")
 
     qty_options = list(range(100, 100100, 100))
 
-    # ▼ 入力エリア
-    with st.container():
-        st.subheader("🔴 買い注文 (Buy)")
-        c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
-        with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
-        with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
-        with c3_radio: buy_mode = st.radio("入力", ["選択", "手入"], key="buy_mode", label_visibility="collapsed", horizontal=False)
-        with c3:
-            if buy_mode == "選択": st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
-            else: st.number_input("数量(手入力)", min_value=1, step=100, key="buy_qty_manual")
-        
-        final_buy_qty = st.session_state.buy_qty if buy_mode == "選択" else st.session_state.get("buy_qty_manual", 0)
-        if buy_mode == "手入": st.session_state.buy_qty = final_buy_qty
+    if IS_ADMIN:
+        with st.expander("🛠️ 取引入力・修正（管理者のみ表示）", expanded=False):
+            with st.container():
+                st.subheader("🔴 買い注文 (Buy)")
+                c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
+                with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
+                with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
+                with c3_radio: buy_mode = st.radio("入力", ["選択", "手入"], key="buy_mode", label_visibility="collapsed", horizontal=False)
+                with c3:
+                    if buy_mode == "選択": st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
+                    else: st.number_input("数量(手入力)", min_value=1, step=100, key="buy_qty_manual")
+                
+                final_buy_qty = st.session_state.buy_qty if buy_mode == "選択" else st.session_state.get("buy_qty_manual", 0)
+                if buy_mode == "手入": st.session_state.buy_qty = final_buy_qty
 
-        with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
-        with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
+                with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
+                with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
 
-    st.write("") 
+            st.write("") 
 
-    with st.container():
-        st.subheader("🔵 売り注文 (Sell)")
-        c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
-        with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
-        with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
-        with c3_radio: sell_mode = st.radio("入力", ["選択", "手入"], key="sell_mode", label_visibility="collapsed", horizontal=False)
-        with c3:
-            if sell_mode == "選択": st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
-            else: st.number_input("数量(手入力)", min_value=1, step=100, key="sell_qty_manual")
-        
-        final_sell_qty = st.session_state.sell_qty if sell_mode == "選択" else st.session_state.get("sell_qty_manual", 0)
-        if sell_mode == "手入": st.session_state.sell_qty = final_sell_qty
+            with st.container():
+                st.subheader("🔵 売り注文 (Sell)")
+                c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
+                with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
+                with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
+                with c3_radio: sell_mode = st.radio("入力", ["選択", "手入"], key="sell_mode", label_visibility="collapsed", horizontal=False)
+                with c3:
+                    if sell_mode == "選択": st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
+                    else: st.number_input("数量(手入力)", min_value=1, step=100, key="sell_qty_manual")
+                
+                final_sell_qty = st.session_state.sell_qty if sell_mode == "選択" else st.session_state.get("sell_qty_manual", 0)
+                if sell_mode == "手入": st.session_state.sell_qty = final_sell_qty
 
-        with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
-        with c5:
-            st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
-            st.checkbox("🎉 恩株化（元本全回収モード）", key="sell_is_bonus", help="チェックすると、売却額から『保有全株のコスト』を差し引いて利益計算します。残り株のコストは0円になります。")
-    
+                with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
+                with c5:
+                    st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
+                    st.checkbox("🎉 恩株化（元本全回収モード）", key="sell_is_bonus", help="チェックすると、売却額から『保有全株のコスト』を差し引いて利益計算します。残り株のコストは0円になります。")
+            
+            st.write("")
+
+            st.markdown("### ⚙️ 過去の損益をまとめて調整する")
+            with st.container():
+                st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
+                c1, c2, c3 = st.columns([1.2, 2, 1])
+                with c1: st.date_input("日付", date.today(), key="adj_date", label_visibility="collapsed")
+                with c2: st.number_input("調整額（マイナスなら - をつけて）", step=1000.0, format="%.0f", key="adj_amount", label_visibility="collapsed")
+                with c3: st.button("調整実行", on_click=handle_adjust, use_container_width=True)
+
     st.write("")
 
-    # ▼ データ調整エリア
-    st.markdown("### ⚙️ 過去の損益をまとめて調整する")
-    with st.container():
-        st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
-        c1, c2, c3 = st.columns([1.2, 2, 1])
-        with c1: st.date_input("日付", date.today(), key="adj_date", label_visibility="collapsed")
-        with c2: st.number_input("調整額（マイナスなら - をつけて）", step=1000.0, format="%.0f", key="adj_amount", label_visibility="collapsed")
-        with c3: st.button("調整実行", on_click=handle_adjust, use_container_width=True)
-
-    st.markdown("---")
-
-    # ▼ ポートフォリオ
+    # ▼ ポートフォリオ（スマホ対応）
     st.subheader("📊 現在のポートフォリオ")
+    
+    # ★ここにスマホ用切り替えスイッチを追加！
+    use_mobile_view = st.toggle("📱 スマホ用表示モード", value=True)
     
     total_onkabu_value = 0 
 
@@ -362,8 +376,6 @@ def main():
             port_options[code] = f"{name} ({code})"
 
             cost = v['qty'] * v['avg_price']
-            
-            # --- 安全装置: 株価取得エラーの場合 ---
             is_data_error = (current_price == 0)
 
             if v['avg_price'] == 0:
@@ -377,7 +389,6 @@ def main():
                     remaining = int(cost - v['realized_pl'])
                     status_text = f"あと{remaining:,}円"
 
-            # 損益計算（エラー時は計算しない）
             if is_data_error:
                 current_price_disp = "⚠️ 取得失敗"
                 change_str = "---"
@@ -414,11 +425,29 @@ def main():
         my_bar.empty()
 
         if rows:
-            df = pd.DataFrame(rows).sort_values('証券コード')
-            df.index = range(1, len(df) + 1)
-            st.dataframe(df, use_container_width=True)
+            # ★ スマホモードONなら「カード表示」にする
+            if use_mobile_view:
+                for row in rows:
+                    with st.container():
+                        st.markdown(f"#### {row['銘柄名']} ({row['証券コード']})")
+                        mc1, mc2 = st.columns(2)
+                        with mc1:
+                            st.write(f"**現在値:** {row['現在値']}")
+                            st.caption(f"前日比: {row['前日比']}")
+                        with mc2:
+                            st.write(f"**含み損益:** {row['含み損益']}")
+                            st.caption(f"騰落率: {row['騰落率']}")
+                        
+                        st.text(f"保有: {row['保有株数']}株 | 平均: {row['平均取得単価']}円")
+                        st.info(f"{row['ステータス']}")
+                        st.divider()
+            else:
+                # PCモードならいつもの表
+                df = pd.DataFrame(rows).sort_values('証券コード')
+                df.index = range(1, len(df) + 1)
+                st.dataframe(df, use_container_width=True)
             
-            with st.expander("📈 恩株シミュレーター", expanded=False):
+            with st.expander("📈 恩株シミュレーター（将来予測）", expanded=False):
                 st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
                 selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
                 
@@ -465,7 +494,6 @@ def main():
     with col_r1:
         if total_pl < 0:
             loss = abs(total_pl)
-            
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
@@ -479,7 +507,6 @@ def main():
                     <h2 style="color: #856404; margin:0;">¥ {int(real_status):,}</h2>
                 </div>
                 """, unsafe_allow_html=True)
-
         else:
             st.markdown(f"""
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
@@ -498,7 +525,8 @@ def main():
                 <h3 style="color: #155724; margin:0;">{title_text}</h3>
                 <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
             </div>""", unsafe_allow_html=True)
-            if reward > 10000:
+            
+            if reward > 10000 and IS_ADMIN:
                 if st.button("💸 通常報酬の支払い完了（リセット）", type="primary"):
                     handle_payment_reset(total_pl, False)
         else:
@@ -517,8 +545,10 @@ def main():
                 <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
                 <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
             </div>""", unsafe_allow_html=True)
-            if st.button("💸 ボーナス支払い完了（リセット）"):
-                handle_payment_reset(bonus_base_profit, True)
+            
+            if IS_ADMIN:
+                if st.button("💸 ボーナス支払い完了（リセット）"):
+                    handle_payment_reset(bonus_base_profit, True)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
@@ -528,8 +558,7 @@ def main():
 
     st.write("")
 
-    # ▼ 📜 過去の報酬支払履歴
-    with st.expander("📜 過去の報酬支払履歴（支払いリセット記録）"):
+    with st.expander("📜 過去の報酬支払履歴"):
         if st.session_state.trade_log:
             pay_logs = [row for row in st.session_state.trade_log if row['証券コード'] == 'PAYMENT']
             if pay_logs:
@@ -548,45 +577,32 @@ def main():
 
     st.write("")
 
-    # ▼ 🗄️ 過去データ詳細（色分け追加）
     with st.expander("🗄️ 過去データ詳細（参照用）"):
         past_df = load_csv_from_github('past_data.csv')
         if not isinstance(past_df, list) and not past_df.empty:
-            
             def highlight_past_data(row):
-                # 取引形態がある場合
                 if '取引形態' in row and pd.notnull(row['取引形態']):
                     val = str(row['取引形態'])
-                    if '利確' in val:
-                        return ['background-color: #ffe6e6; color: black'] * len(row) # 薄いピンク
-                    elif '損切' in val:
-                        return ['background-color: #e6f2ff; color: black'] * len(row) # 薄い青
-                
-                # なければ損益で判断
+                    if '利確' in val: return ['background-color: #ffe6e6; color: black'] * len(row)
+                    elif '損切' in val: return ['background-color: #e6f2ff; color: black'] * len(row)
                 if '損益' in row and pd.notnull(row['損益']):
                     try:
                         pl = float(row['損益'])
-                        if pl > 0:
-                            return ['background-color: #ffe6e6; color: black'] * len(row)
-                        elif pl < 0:
-                            return ['background-color: #e6f2ff; color: black'] * len(row)
+                        if pl > 0: return ['background-color: #ffe6e6; color: black'] * len(row)
+                        elif pl < 0: return ['background-color: #e6f2ff; color: black'] * len(row)
                     except: pass
-                
                 return [''] * len(row)
 
             st.dataframe(past_df.style.apply(highlight_past_data, axis=1), use_container_width=True)
         else:
-            st.info("past_data.csv が見つかりません。GitHubにアップロードしてください。")
+            st.info("past_data.csv が見つかりません。")
 
     st.markdown("---")
 
-    # ▼ 📜 全取引履歴（グラフ機能付き）
     st.subheader("📜 全取引履歴 (銘柄別アーカイブ)")
     
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
-        
-        # 日付順にならべておく（グラフ用）
         df_log['日付'] = pd.to_datetime(df_log['日付']).dt.date
         df_log = df_log.sort_values('日付')
 
@@ -606,17 +622,13 @@ def main():
                 else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
 
             with st.expander(label):
-                 # ▼▼▼ グラフ描画エリア ▼▼▼
                 if c != "ADJUST":
                     st.caption("📊 損益推移グラフ")
-                    # 確定損益が0以外のデータ（決済データ）だけ抽出してグラフ化
                     chart_df = sub_df[sub_df['確定損益'] != 0].copy()
                     if not chart_df.empty:
-                        # 日付をインデックスにして棒グラフを表示
                         st.bar_chart(chart_df.set_index('日付')['確定損益'], color="#FF4B4B")
                     else:
                         st.caption("※決済データがまだありません")
-                # ▲▲▲ 追加エリアここまで ▲▲▲
 
                 st.dataframe(
                     sub_df[['日付','区分','数量','約定単価','確定損益','ボーナス']].sort_values('日付', ascending=False),
@@ -625,26 +637,27 @@ def main():
 
         st.write("")
         
-        with st.expander("🛠️ データの修正・削除はこちら（クリックで開く）"):
-            if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
-            if "ボーナス" not in df_log.columns: df_log["ボーナス"] = False
-            
-            edited_df = st.data_editor(
-                df_log.sort_values('日付', ascending=False),
-                num_rows="dynamic",
-                use_container_width=True, hide_index=True,
-                column_config={
-                    "削除": st.column_config.CheckboxColumn("削除", width="small"),
-                    "ボーナス": st.column_config.CheckboxColumn("🎉恩株", width="small", help="恩株化（元本全回収）の取引だった場合はチェック"),
-                    "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
-                    "数量": st.column_config.NumberColumn("数量", min_value=0),
-                    "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
-                    "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
-                    "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
-                }
-            )
-            if st.button("💾 修正・削除を反映", type="secondary"):
-                handle_save_changes(edited_df)
+        if IS_ADMIN:
+            with st.expander("🛠️ データの修正・削除（管理者のみ）", expanded=False):
+                if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
+                if "ボーナス" not in df_log.columns: df_log["ボーナス"] = False
+                
+                edited_df = st.data_editor(
+                    df_log.sort_values('日付', ascending=False),
+                    num_rows="dynamic",
+                    use_container_width=True, hide_index=True,
+                    column_config={
+                        "削除": st.column_config.CheckboxColumn("削除", width="small"),
+                        "ボーナス": st.column_config.CheckboxColumn("🎉恩株", width="small", help="恩株化（元本全回収）の取引だった場合はチェック"),
+                        "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
+                        "数量": st.column_config.NumberColumn("数量", min_value=0),
+                        "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
+                        "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
+                        "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
+                    }
+                )
+                if st.button("💾 修正・削除を反映", type="secondary"):
+                    handle_save_changes(edited_df)
     else:
         st.info("履歴なし")
 
