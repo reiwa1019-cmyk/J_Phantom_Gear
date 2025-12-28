@@ -3,3 +3,4 @@ pandas
 yfinance
 beautifulsoup4
 requests
+PyGithub
