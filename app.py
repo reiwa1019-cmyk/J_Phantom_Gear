@@ -37,7 +37,7 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# --- 1. 高速化関数群 ---
+# --- 1. 関数群 ---
 
 def get_github_repo():
     try:
@@ -49,6 +49,7 @@ def get_github_repo():
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_stock_info(code):
     code = str(code).strip()
+    if code == "ADJUST": return "過去損益調整", 0, 0, 0 # 調整用
     try:
         ticker = yf.Ticker(f"{code}.T")
         name = ticker.info.get('longName')
@@ -121,9 +122,15 @@ def recalculate_all(logs):
 
     for log in sorted_logs:
         code = str(log['証券コード']).strip()
+        trade_type = log['区分']
+        
+        # 調整モードの場合はポートフォリオ計算をスキップして損益だけ記録
+        if trade_type == "データ調整":
+            processed_logs.append(log)
+            continue
+
         qty = int(log['数量'])
         price = float(log['約定単価'])
-        trade_type = log['区分']
         
         log_name = log.get('銘柄名')
         current_name_in_port = portfolio.get(code, {}).get('name')
@@ -159,23 +166,29 @@ def recalculate_all(logs):
 # --- 2. イベントハンドラ ---
 
 def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
-    if not code_val or qty_val <= 0: return
-
     s = st.session_state
-    code = str(code_val).strip()
-
+    
     with st.spinner('🚀 処理中...'):
-        name, _, _, _ = get_stock_info(code)
-        
-        new_log = {
-            '日付': date_val,
-            '区分': tx_type,
-            '証券コード': code,
-            '銘柄名': name,
-            '数量': qty_val,
-            '約定単価': price_val,
-            '平均単価': 0, '確定損益': 0
-        }
+        if tx_type == "データ調整":
+            # 調整用ロジック
+            new_log = {
+                '日付': date_val,
+                '区分': tx_type,
+                '証券コード': "ADJUST",
+                '銘柄名': "📊 過去損益調整引継",
+                '数量': 0,
+                '約定単価': 0,
+                '平均単価': 0,
+                '確定損益': int(price_val) # 金額をそのまま損益へ
+            }
+        else:
+            if not code_val or qty_val <= 0: return
+            code = str(code_val).strip()
+            name, _, _, _ = get_stock_info(code)
+            new_log = {
+                '日付': date_val, '区分': tx_type, '証券コード': code, '銘柄名': name,
+                '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0
+            }
         
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
@@ -185,7 +198,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
         
         s.portfolio = new_port
         s.trade_log = new_logs
-        st.toast(f"✅ {name} {tx_type} 反映完了")
+        st.toast("✅ 反映完了")
 
 def handle_buy():
     s = st.session_state
@@ -199,13 +212,17 @@ def handle_sell():
     s.sell_code = ""
     s.sell_price = 0.0
 
+def handle_adjust():
+    s = st.session_state
+    # 調整額を確定損益として渡す
+    execute_transaction("データ調整", s.adj_date, "ADJUST", 0, s.adj_amount)
+    s.adj_amount = 0.0
+
 def handle_save_changes(edited_df):
     with st.spinner('💾 再計算中...'):
-        # 削除チェックが入っていない行だけを残す
         if '削除' in edited_df.columns:
             valid_rows = edited_df[edited_df['削除'] == False].drop(columns=['削除'])
-        else:
-            valid_rows = edited_df
+        else: valid_rows = edited_df
 
         logs = valid_rows.to_dict(orient='records')
         new_port, new_logs = recalculate_all(logs)
@@ -231,13 +248,12 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    # ▼ 入力エリア (number_inputに変更！)
+    # ▼ 入力エリア
     with st.container():
         st.subheader("🔵 買い注文 (Buy)")
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
-        # 手入力も可能な数値入力に変更（step=100でボタン操作も楽）
         with c3: st.number_input("数量", min_value=100, step=100, key="buy_qty", label_visibility="collapsed")
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
         with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
@@ -249,10 +265,19 @@ def main():
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
-        # 手入力も可能な数値入力に変更
         with c3: st.number_input("数量", min_value=100, step=100, key="sell_qty", label_visibility="collapsed")
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
         with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
+    
+    st.write("")
+
+    # ▼ データ調整エリア（新設）
+    with st.expander("⚙️ 過去の損益をまとめて調整する（スタートライン設定）"):
+        st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
+        c1, c2, c3 = st.columns([1.2, 2, 1])
+        with c1: st.date_input("日付", date.today(), key="adj_date", label_visibility="collapsed")
+        with c2: st.number_input("調整額（マイナスなら - をつけて）", step=1000.0, format="%.0f", key="adj_amount", label_visibility="collapsed")
+        with c3: st.button("調整実行", on_click=handle_adjust, use_container_width=True)
 
     st.markdown("---")
 
@@ -389,12 +414,9 @@ def main():
             name_disp = sub_df.iloc[0]['銘柄名']
             sub_pl = sub_df['確定損益'].sum()
             
-            if sub_pl > 0:
-                label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
-            elif sub_pl < 0:
-                label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
-            else:
-                label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
+            if sub_pl > 0: label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
+            elif sub_pl < 0: label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
+            else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
 
             with st.expander(label):
                 st.dataframe(
@@ -405,12 +427,11 @@ def main():
         st.write("")
         
         with st.expander("🛠️ データの修正・削除はこちら（クリックで開く）"):
-            # 修正：行削除のバグ対策として、常に初期値を与えず、num_rows="dynamic"で追加・削除を許可する
             if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
             
             edited_df = st.data_editor(
                 df_log,
-                num_rows="dynamic", # 行の追加削除用
+                num_rows="dynamic",
                 use_container_width=True, hide_index=True,
                 column_config={
                     "削除": st.column_config.CheckboxColumn("削除", width="small", help="チェックを入れて下のボタンを押すと削除されます"),
