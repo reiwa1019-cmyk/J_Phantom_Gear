@@ -7,11 +7,10 @@ import yfinance as yf
 import time
 import math
 
-# --- 0. 設定・セキュリティ（自動ログイン機能付き） ---
+# --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
 
 def check_password():
-    # 1. URLに認証トークンがあるかチェック（更新対策）
     if st.query_params.get("auth") == "granted":
         st.session_state['logged_in'] = True
     
@@ -19,20 +18,17 @@ def check_password():
         st.session_state['logged_in'] = False
 
     if st.session_state['logged_in']:
-        # サイドバーにログアウトボタン
         if st.sidebar.button("ログアウト"):
             st.session_state['logged_in'] = False
-            st.query_params.clear() # URLパラメータを消去
+            st.query_params.clear()
             st.rerun()
         return True
 
-    # ログイン画面
     st.markdown("### 🔒 PASS")
     password = st.text_input("", type="password", label_visibility="collapsed")
     if st.button("ENTER"):
         if password == st.secrets["general"]["APP_PASSWORD"]:
             st.session_state['logged_in'] = True
-            # ★ここでURLに認証情報を付与（これでリロードしても平気！）
             st.query_params["auth"] = "granted"
             st.rerun()
         else:
@@ -50,16 +46,31 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_stock_name_cached(code):
+@st.cache_data(ttl=3600, show_spinner=False) # 株価などの情報は1時間キャッシュ
+def get_stock_info(code):
+    """銘柄名と現在株価情報をまとめて取得"""
     code = str(code).strip()
     try:
         ticker = yf.Ticker(f"{code}.T")
+        
+        # 名前取得
         name = ticker.info.get('longName')
         if not name: name = ticker.info.get('shortName')
-        return name if name else f"コード({code})"
+        if not name: name = f"コード({code})"
+
+        # 株価情報取得 (fast_infoを使用)
+        price = ticker.fast_info.last_price
+        prev_close = ticker.fast_info.previous_close
+        
+        change = 0
+        pct_change = 0
+        if price and prev_close:
+            change = price - prev_close
+            pct_change = (change / prev_close) * 100
+            
+        return name, price, change, pct_change
     except:
-        return f"コード({code})"
+        return f"コード({code})", 0, 0, 0
 
 def load_csv_from_github(filename):
     repo = get_github_repo()
@@ -118,6 +129,7 @@ def recalculate_all(logs):
         price = float(log['約定単価'])
         trade_type = log['区分']
         
+        # ログにある名前情報を優先（表示速度のため）
         log_name = log.get('銘柄名')
         current_name_in_port = portfolio.get(code, {}).get('name')
         
@@ -158,11 +170,8 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
     code = str(code_val).strip()
 
     with st.spinner('🚀 処理中...'):
-        current_port_name = s.portfolio.get(code, {}).get('name')
-        if current_port_name and "コード(" not in current_port_name:
-            name = current_port_name
-        else:
-            name = get_stock_name_cached(code)
+        # 最新の名前を取得して保存
+        name, _, _, _ = get_stock_info(code)
         
         new_log = {
             '日付': date_val,
@@ -251,27 +260,46 @@ def main():
 
     st.markdown("---")
 
-    # ▼ ポートフォリオ
+    # ▼ ポートフォリオ (株価情報 & 新レイアウト)
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state.portfolio:
         rows = []
         port_options = {}
 
+        # ポートフォリオの一覧作成
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            name = v.get('name', '-')
+            # ここで株価情報を取得！
+            name, current_price, change, pct_change = get_stock_info(code)
+            
             port_options[code] = f"{name} ({code})"
 
+            # 計算
             cost = v['qty'] * v['avg_price']
             is_onkabu = v['realized_pl'] >= cost
-            status = "🏆完全恩株" if is_onkabu else f"あと{int(cost - v['realized_pl']):,}円"
             
+            # ステータスの言葉を「恩株までの距離」に変更
+            if is_onkabu:
+                status_text = "🏆完全恩株達成！"
+            else:
+                remaining = int(cost - v['realized_pl'])
+                status_text = f"あと{remaining:,}円"
+
+            # 騰落率の装飾 (プラスなら赤、マイナスなら緑... は分かりにくいので矢印で)
+            mark = "🔺" if change > 0 else "▼" if change < 0 else "➖"
+            change_str = f"{mark} {int(change)} ({pct_change:+.2f}%)"
+
             rows.append({
-                '証券コード': code, '銘柄名': name,
-                '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
-                '現在保有コスト': f"{int(cost):,}", '累計確定利益': f"{int(v['realized_pl']):,}",
-                'ステータス': status
+                '証券コード': code, 
+                '銘柄名': name,
+                '現在値': f"{int(current_price):,}円",
+                '前日比': change_str,
+                '保有株数': v['qty'], 
+                '平均取得単価': f"{v['avg_price']:,.0f}",
+                '保有元本': f"{int(cost):,}", # 「現在保有コスト」から変更
+                '恩株までの距離': status_text, # 「ステータス」から変更
+                '累計確定利益': f"{int(v['realized_pl']):,}" # 一番右へ移動
             })
         
         if rows:
@@ -279,7 +307,7 @@ def main():
             df.index = range(1, len(df) + 1)
             st.dataframe(df, use_container_width=True)
             
-            # ▼ 恩株シミュレーター (100株単位対応版)
+            # 恩株シミュレーター
             with st.expander("📈 恩株シミュレーター", expanded=False):
                 st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
                 selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
@@ -287,7 +315,6 @@ def main():
                 if selected_code_display:
                     selected_code = selected_code_display.split("(")[-1].replace(")", "").strip()
                     target_data = st.session_state.portfolio[selected_code]
-                    
                     avg = target_data['avg_price']
                     qty = target_data['qty']
                     realized = target_data['realized_pl']
@@ -298,113 +325,110 @@ def main():
                     else:
                         sim_rows = []
                         patterns = [0, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]
-                        
                         for p in patterns:
                             target_price = avg * (1 + p/100)
-                            
-                            # 理論上の必要売却株数 (切り上げ)
-                            raw_needed_shares = math.ceil(remaining_cost / target_price)
-                            
-                            # ★ここで100株単位に切り上げる
-                            # (例: 130株必要 -> 200株)
-                            unit_needed_shares = math.ceil(raw_needed_shares / 100) * 100
-                            
-                            remaining_shares = qty - unit_needed_shares
-                            
-                            if remaining_shares >= 0:
-                                judge = f"✅ 残{remaining_shares}株"
-                            else:
-                                judge = "❌ 不可"
-
+                            raw_needed = math.ceil(remaining_cost / target_price)
+                            unit_needed = math.ceil(raw_needed / 100) * 100
+                            rem_shares = qty - unit_needed
+                            judge = f"✅ 残{rem_shares}株" if rem_shares >= 0 else "❌ 不可"
                             sim_rows.append({
-                                "上昇率": f"+{p}%",
-                                "想定株価": f"{target_price:,.0f}円",
-                                "必要売却数": f"{unit_needed_shares:,}株", # 100株単位
-                                "恩株結果": judge
+                                "上昇率": f"+{p}%", "想定株価": f"{target_price:,.0f}円",
+                                "必要売却数": f"{unit_needed:,}株", "恩株結果": judge
                             })
-                        
                         st.dataframe(pd.DataFrame(sim_rows), use_container_width=True)
-
         else: st.info("保有なし")
     else: st.info("データなし")
 
     st.write("")
 
-    # ▼ 💰 成功報酬管理エリア (ここに移動！)
+    # ▼ 💰 成功報酬管理
     st.subheader("💰 成功報酬管理")
-    
     total_realized_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
+    col_r1, col_r2 = st.columns(2)
     
-    col_reward1, col_reward2 = st.columns(2)
-    
-    with col_reward1:
+    with col_r1:
         if total_realized_pl > 0:
-            reward_amount = total_realized_pl * 0.15
-            if reward_amount > 10000:
+            reward = total_realized_pl * 0.15
+            if reward > 10000:
                 st.markdown(f"""
                 <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
                     <h3 style="color: #155724; margin:0;">🎉 成功報酬請求額 (15%)</h3>
-                    <h1 style="color: #155724; margin:0;">¥ {int(reward_amount):,}</h1>
+                    <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
                     <p style="margin:0; color:#555;">(対象純利益: ¥ {int(total_realized_pl):,})</p>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>""", unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd;">
                     <h3 style="color: #6c757d; margin:0;">⚠️ 請求不可 (1万円以下)</h3>
-                    <h1 style="color: #6c757d; margin:0;">¥ {int(reward_amount):,}</h1>
+                    <h1 style="color: #6c757d; margin:0;">¥ {int(reward):,}</h1>
                     <p style="margin:0;">※報酬額が1万円を超えると請求対象になります</p>
-                </div>
-                """, unsafe_allow_html=True)
+                </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
                 <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
                 <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
                 <p style="margin:0;">（純利益が出ていないため請求なし）</p>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
 
-    with col_reward2:
+    with col_r2:
         if total_realized_pl < 0:
-            loss_to_cover = abs(total_realized_pl)
+            loss = abs(total_realized_pl)
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ 損失補填が必要な額</h3>
-                <h1 style="color: #721c24; margin:0;">¥ {int(loss_to_cover):,}</h1>
+                <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
                 <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
-            </div>
-            """, unsafe_allow_html=True)
+            </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
                 <h3 style="color: #0c5460; margin:0;">✨ 損益</h3>
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-            </div>
-            """, unsafe_allow_html=True)
-            
+            </div>""", unsafe_allow_html=True)
+
     st.markdown("---")
 
-    # ▼ 履歴 (一番下に移動！)
-    st.subheader("📜 全取引履歴")
+    # ▼ 📜 全取引履歴 (銘柄別アーカイブ)
+    st.subheader("📜 全取引履歴 (銘柄別アーカイブ)")
+    
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
-        if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
-        else: df_log["削除"] = False
         
-        edited_df = st.data_editor(
-            df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "削除": st.column_config.CheckboxColumn("削除", width="small"),
-                "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
-                "数量": st.column_config.NumberColumn("数量", min_value=0),
-                "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
-                "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
-                "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
-            }
-        )
-        if st.button("💾 履歴の修正・削除を反映", type="secondary"):
-            handle_save_changes(edited_df)
+        unique_codes = df_log['証券コード'].unique()
+        for c in unique_codes:
+            sub_df = df_log[df_log['証券コード'] == c]
+            name_disp = sub_df.iloc[0]['銘柄名']
+            sub_pl = sub_df['確定損益'].sum()
+            
+            label = f"📁 {name_disp} ({c}) | 累計損益: ¥{int(sub_pl):,}"
+            with st.expander(label):
+                st.dataframe(
+                    sub_df[['日付','区分','数量','約定単価','確定損益']].sort_values('日付', ascending=False),
+                    use_container_width=True, hide_index=True
+                )
+
+        st.write("")
+        
+        with st.expander("🛠️ データの修正・削除はこちら（クリックで開く）"):
+            if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
+            else: df_log["削除"] = False
+            
+            edited_df = st.data_editor(
+                df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
+                column_config={
+                    "削除": st.column_config.CheckboxColumn("削除", width="small"),
+                    "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
+                    "数量": st.column_config.NumberColumn("数量", min_value=0),
+                    "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
+                    "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
+                    "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
+                }
+            )
+            if st.button("💾 修正・削除を反映", type="secondary"):
+                handle_save_changes(edited_df)
+    else:
+        st.info("履歴なし")
 
 if __name__ == "__main__":
     main()
