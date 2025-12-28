@@ -151,10 +151,9 @@ def recalculate_all(logs):
             cur = portfolio[code]
             total_cost = (cur['qty'] * cur['avg_price']) + (qty * price)
             
-            # original_avg の計算（ゼロ除算対策含む）
             base_avg = cur.get('original_avg', cur['avg_price'])
-            if base_avg == 0 and cur['qty'] == 0: base_avg = price # 初回購入時など
-            elif base_avg == 0 and cur['avg_price'] > 0: base_avg = cur['avg_price'] # データ不整合時の補正
+            if base_avg == 0 and cur['qty'] == 0: base_avg = price
+            elif base_avg == 0 and cur['avg_price'] > 0: base_avg = cur['avg_price']
 
             total_real_cost = (cur['qty'] * base_avg) + (qty * price)
             total_qty = cur['qty'] + qty
@@ -173,12 +172,9 @@ def recalculate_all(logs):
                     sell_amount = qty * price
                     profit = sell_amount - total_holding_cost
                     new_avg = 0.0
-                    
-                    # 売却時は original_avg を維持する（変えない）
                     portfolio[code]['qty'] = max(0, cur['qty'] - qty)
                     portfolio[code]['avg_price'] = new_avg
                     portfolio[code]['realized_pl'] += profit
-                    
                     log.update({'平均単価': new_avg, '確定損益': profit, '銘柄名': portfolio[code]['name']})
                 else:
                     profit = (price - cur['avg_price']) * qty
@@ -334,7 +330,7 @@ def main():
     # ▼ ポートフォリオ
     st.subheader("📊 現在のポートフォリオ")
     
-    total_onkabu_value = 0 # 恩株評価額合計用
+    total_onkabu_value = 0 
 
     if st.session_state.portfolio:
         rows = []
@@ -348,10 +344,9 @@ def main():
 
             cost = v['qty'] * v['avg_price']
             
-            # 恩株判定と評価額集計
             if v['avg_price'] == 0:
                 status_text = "👑 恩株 (コスト0円)"
-                total_onkabu_value += (current_price * v['qty']) # 恩株の現在価値を加算
+                total_onkabu_value += (current_price * v['qty']) 
             else:
                 is_onkabu = v['realized_pl'] >= cost
                 if is_onkabu: status_text = "🏆完全恩株達成！"
@@ -360,8 +355,6 @@ def main():
                     status_text = f"あと{remaining:,}円"
 
             unrealized_pl = (current_price - v['avg_price']) * v['qty']
-            
-            # ★騰落率計算（コスト0の場合はoriginal_avgを使用）
             calc_base_price = v.get('original_avg', v['avg_price'])
             if calc_base_price == 0: calc_base_price = v['avg_price']
 
@@ -373,7 +366,7 @@ def main():
             change_str = f"{mark_change} {int(change)} ({pct_change:+.2f}%)"
             mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
             pl_str = f"{mark_pl} {int(unrealized_pl):,}"
-            mark_pct = "+" if unrealized_pct > 0 else "" if unrealized_pct < 0 else ""
+            mark_pct = "+" if unrealized_pct > 0 else ""
             pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
             rows.append({
@@ -433,26 +426,47 @@ def main():
     
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
     
+    # 1. マイナス合算（★ここを修正: ボーナス発生中は実質マイナスを隠す）
     with col_r1:
         if total_pl < 0:
             loss = abs(total_pl)
+            
+            # 実質マイナスの表示ロジック
+            real_status_html = ""
+            if bonus_base_profit > 0:
+                # ボーナス発生中 -> 隠す（ストイックモード）
+                pass 
+            elif total_onkabu_value > 0:
+                # ボーナスなし＆恩株あり -> 表示（安心モード）
+                real_status_html = f"""
+                <hr style="border-color:#f5c6cb;">
+                <h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
+                <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                """
+
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
                 <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-                <hr style="border-color:#f5c6cb;">
-                <h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
-                <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
+                {real_status_html}
             </div>""", unsafe_allow_html=True)
         else:
+            # プラスの場合
+            real_status_html = ""
+            if bonus_base_profit == 0 and total_onkabu_value > 0:
+                 real_status_html = f"""
+                <hr style="border-color:#bee5eb;">
+                <h4 style="color: #0c5460; margin:0;">📈 実質資産 (恩株込)</h4>
+                <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                """
+            
             st.markdown(f"""
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
                 <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
                 <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
-                <hr style="border-color:#bee5eb;">
-                <h4 style="color: #0c5460; margin:0;">📈 実質資産 (恩株込)</h4>
-                <h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
+                {real_status_html}
             </div>""", unsafe_allow_html=True)
 
     with col_r2:
@@ -530,6 +544,7 @@ def main():
     
     if st.session_state.trade_log:
         df_log = pd.DataFrame(st.session_state.trade_log)
+        
         unique_codes = df_log['証券コード'].unique()
         for c in unique_codes:
             sub_df = df_log[df_log['証券コード'] == c]
