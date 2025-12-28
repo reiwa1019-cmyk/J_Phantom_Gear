@@ -240,7 +240,6 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    # プルダウンの選択肢
     qty_options = list(range(100, 100100, 100))
 
     # ▼ 入力エリア
@@ -250,21 +249,15 @@ def main():
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
         
-        # 株数入力切り替えスイッチ
         with c3_radio:
             buy_mode = st.radio("入力", ["選択", "手入"], key="buy_mode", label_visibility="collapsed", horizontal=False)
-        
-        # スイッチによって表示を変える
         with c3:
             if buy_mode == "選択":
                 st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
             else:
                 st.number_input("数量(手入力)", min_value=1, step=100, key="buy_qty_manual")
-                # 手入力の値をメイン変数に渡す処理（簡易化のためsession_state操作はせず、実行時に判定）
         
-        # 実行ボタン用の値を決定
         final_buy_qty = st.session_state.buy_qty if buy_mode == "選択" else st.session_state.get("buy_qty_manual", 0)
-        # (セッションステート書き換えハック)
         if buy_mode == "手入": st.session_state.buy_qty = final_buy_qty
 
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
@@ -280,7 +273,6 @@ def main():
         
         with c3_radio:
             sell_mode = st.radio("入力", ["選択", "手入"], key="sell_mode", label_visibility="collapsed", horizontal=False)
-        
         with c3:
             if sell_mode == "選択":
                 st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
@@ -295,7 +287,7 @@ def main():
     
     st.write("")
 
-    # ▼ データ調整エリア（見つかりやすいように最初から展開済み！）
+    # ▼ データ調整エリア
     st.markdown("### ⚙️ 過去の損益をまとめて調整する")
     with st.container():
         st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
@@ -326,8 +318,21 @@ def main():
                 remaining = int(cost - v['realized_pl'])
                 status_text = f"あと{remaining:,}円"
 
-            mark = "🔺" if change > 0 else "▼" if change < 0 else "➖"
-            change_str = f"{mark} {int(change)} ({pct_change:+.2f}%)"
+            # 騰落率＆含み益の計算
+            unrealized_pl = (current_price - v['avg_price']) * v['qty']
+            unrealized_pct = 0.0
+            if v['avg_price'] > 0:
+                unrealized_pct = ((current_price - v['avg_price']) / v['avg_price']) * 100
+            
+            # 装飾
+            mark_change = "🔺" if change > 0 else "▼" if change < 0 else "➖"
+            change_str = f"{mark_change} {int(change)} ({pct_change:+.2f}%)"
+
+            mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
+            pl_str = f"{mark_pl} {int(unrealized_pl):,}"
+            
+            mark_pct = "+" if unrealized_pct > 0 else ""
+            pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
             rows.append({
                 '証券コード': code, 
@@ -336,6 +341,8 @@ def main():
                 '前日比': change_str,
                 '保有株数': v['qty'], 
                 '平均取得単価': f"{v['avg_price']:,.0f}",
+                '騰落率': pct_str,  # NEW
+                '損益': pl_str,      # NEW
                 '保有元本': f"{int(cost):,}",
                 '恩株までの距離': status_text,
                 '累計確定利益': f"{int(v['realized_pl']):,}"
@@ -436,12 +443,18 @@ def main():
         unique_codes = df_log['証券コード'].unique()
         for c in unique_codes:
             sub_df = df_log[df_log['証券コード'] == c]
-            name_disp = sub_df.iloc[0]['銘柄名']
-            sub_pl = sub_df['確定損益'].sum()
             
-            if sub_pl > 0: label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
-            elif sub_pl < 0: label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
-            else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
+            # 名前の取得（ADJUST対応）
+            if c == "ADJUST":
+                name_disp = "📊 過去損益調整"
+                sub_pl = sub_df['確定損益'].sum()
+                label = f"⚙️ {name_disp} | 調整額: ¥{int(sub_pl):,}"
+            else:
+                name_disp = sub_df.iloc[0]['銘柄名']
+                sub_pl = sub_df['確定損益'].sum()
+                if sub_pl > 0: label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
+                elif sub_pl < 0: label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
+                else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
 
             with st.expander(label):
                 st.dataframe(
