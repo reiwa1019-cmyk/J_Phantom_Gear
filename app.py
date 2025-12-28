@@ -5,6 +5,7 @@ from github import Github
 import io
 import yfinance as yf
 import time
+import math # 計算用に追加
 
 # --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
@@ -245,15 +246,21 @@ def main():
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state.portfolio:
         rows = []
+        port_options = {} # シミュレータ用
+
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
+            # 銘柄選択肢用に保存
+            name = v.get('name', '-')
+            port_options[code] = f"{name} ({code})"
+
             cost = v['qty'] * v['avg_price']
             is_onkabu = v['realized_pl'] >= cost
             status = "🏆完全恩株" if is_onkabu else f"あと{int(cost - v['realized_pl']):,}円"
             
             rows.append({
-                '証券コード': code, '銘柄名': v.get('name', '-'),
+                '証券コード': code, '銘柄名': name,
                 '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
                 '現在保有コスト': f"{int(cost):,}", '累計確定利益': f"{int(v['realized_pl']):,}",
                 'ステータス': status
@@ -263,6 +270,52 @@ def main():
             df = pd.DataFrame(rows).sort_values('証券コード')
             df.index = range(1, len(df) + 1)
             st.dataframe(df, use_container_width=True)
+            
+            # ▼ 恩株シミュレーター (NEW!)
+            with st.expander("📈 恩株シミュレーター（ここを開く）", expanded=False):
+                st.info("保有している銘柄を選択すると、上昇率ごとに「何株売れば恩株化できるか」を計算します。")
+                selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
+                
+                if selected_code_display:
+                    # コード抽出
+                    selected_code = selected_code_display.split("(")[-1].replace(")", "").strip()
+                    target_data = st.session_state.portfolio[selected_code]
+                    
+                    avg = target_data['avg_price']
+                    qty = target_data['qty']
+                    realized = target_data['realized_pl']
+                    remaining_cost = (avg * qty) - realized # まだ回収できていないコスト
+                    
+                    if remaining_cost <= 0:
+                         st.success("🎉 すでに恩株化達成済みです！")
+                    else:
+                        sim_rows = []
+                        # 上昇率パターン (0%から300%まで)
+                        patterns = [0, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]
+                        
+                        for p in patterns:
+                            target_price = avg * (1 + p/100)
+                            
+                            # 回収に必要な売却額 / その時の株価 = 必要株数
+                            # (切り上げないと元本割れするので math.ceil を使う)
+                            needed_shares = math.ceil(remaining_cost / target_price)
+                            
+                            remaining_shares = qty - needed_shares
+                            
+                            if remaining_shares > 0:
+                                judge = f"✅ 残{remaining_shares}株"
+                            else:
+                                judge = "❌ 不可"
+
+                            sim_rows.append({
+                                "上昇率": f"+{p}%",
+                                "想定株価": f"{target_price:,.0f}円",
+                                "必要売却数": f"{needed_shares:,}株",
+                                "恩株結果": judge
+                            })
+                        
+                        st.dataframe(pd.DataFrame(sim_rows), use_container_width=True)
+
         else: st.info("保有なし")
     else: st.info("データなし")
 
@@ -291,20 +344,16 @@ def main():
     
     st.markdown("---")
 
-    # ▼ 💰 成功報酬管理エリア (Logic Update!)
+    # ▼ 💰 成功報酬管理エリア
     st.subheader("💰 成功報酬管理")
     
-    # 全取引の損益合算（これが「ネットの純損益」）
     total_realized_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
     
     col_reward1, col_reward2 = st.columns(2)
     
     with col_reward1:
         if total_realized_pl > 0:
-            # 15%計算
             reward_amount = total_realized_pl * 0.15
-            
-            # 条件: 1万円以下は請求できない
             if reward_amount > 10000:
                 st.markdown(f"""
                 <div style="background-color: #d4edda; padding: 20px; border-radius: 10px; border: 2px solid #c3e6cb;">
