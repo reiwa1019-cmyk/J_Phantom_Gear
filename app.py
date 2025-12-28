@@ -201,9 +201,11 @@ def handle_sell():
 
 def handle_save_changes(edited_df):
     with st.spinner('💾 再計算中...'):
+        # 削除チェックが入っていない行だけを残す
         if '削除' in edited_df.columns:
             valid_rows = edited_df[edited_df['削除'] == False].drop(columns=['削除'])
-        else: valid_rows = edited_df
+        else:
+            valid_rows = edited_df
 
         logs = valid_rows.to_dict(orient='records')
         new_port, new_logs = recalculate_all(logs)
@@ -229,15 +231,14 @@ def main():
     st.caption("成功報酬帳簿")
     st.markdown("---")
 
-    qty_options = list(range(100, 100100, 100))
-
-    # ▼ 入力エリア
+    # ▼ 入力エリア (number_inputに変更！)
     with st.container():
         st.subheader("🔵 買い注文 (Buy)")
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="buy_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="buy_code", label_visibility="collapsed")
-        with c3: st.selectbox("数量", qty_options, index=0, key="buy_qty", label_visibility="collapsed")
+        # 手入力も可能な数値入力に変更（step=100でボタン操作も楽）
+        with c3: st.number_input("数量", min_value=100, step=100, key="buy_qty", label_visibility="collapsed")
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="buy_price", label_visibility="collapsed")
         with c5: st.button("買い実行", on_click=handle_buy, type="primary", use_container_width=True)
 
@@ -248,7 +249,8 @@ def main():
         c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1, 1, 1])
         with c1: st.date_input("日付", date.today(), key="sell_date", label_visibility="collapsed")
         with c2: st.text_input("証券コード", placeholder="証券コード", key="sell_code", label_visibility="collapsed")
-        with c3: st.selectbox("数量", qty_options, index=0, key="sell_qty", label_visibility="collapsed")
+        # 手入力も可能な数値入力に変更
+        with c3: st.number_input("数量", min_value=100, step=100, key="sell_qty", label_visibility="collapsed")
         with c4: st.number_input("単価", step=0.1, format="%.1f", placeholder="単価", key="sell_price", label_visibility="collapsed")
         with c5: st.button("売り実行", on_click=handle_sell, type="secondary", use_container_width=True)
 
@@ -264,7 +266,6 @@ def main():
             if v['qty'] <= 0: continue
             
             name, current_price, change, pct_change = get_stock_info(code)
-            
             port_options[code] = f"{name} ({code})"
 
             cost = v['qty'] * v['avg_price']
@@ -376,7 +377,7 @@ def main():
 
     st.markdown("---")
 
-    # ▼ 📜 全取引履歴 (銘柄別アーカイブ)
+    # ▼ 📜 全取引履歴
     st.subheader("📜 全取引履歴 (銘柄別アーカイブ)")
     
     if st.session_state.trade_log:
@@ -388,7 +389,6 @@ def main():
             name_disp = sub_df.iloc[0]['銘柄名']
             sub_pl = sub_df['確定損益'].sum()
             
-            # ★ここで色分け（赤：プラス、青：マイナス）
             if sub_pl > 0:
                 label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
             elif sub_pl < 0:
@@ -405,13 +405,15 @@ def main():
         st.write("")
         
         with st.expander("🛠️ データの修正・削除はこちら（クリックで開く）"):
+            # 修正：行削除のバグ対策として、常に初期値を与えず、num_rows="dynamic"で追加・削除を許可する
             if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
-            else: df_log["削除"] = False
             
             edited_df = st.data_editor(
-                df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
+                df_log,
+                num_rows="dynamic", # 行の追加削除用
+                use_container_width=True, hide_index=True,
                 column_config={
-                    "削除": st.column_config.CheckboxColumn("削除", width="small"),
+                    "削除": st.column_config.CheckboxColumn("削除", width="small", help="チェックを入れて下のボタンを押すと削除されます"),
                     "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                     "数量": st.column_config.NumberColumn("数量", min_value=0),
                     "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
