@@ -5,22 +5,35 @@ from github import Github
 import io
 import yfinance as yf
 import time
-import math # 計算用に追加
+import math
 
-# --- 0. 設定・セキュリティ ---
+# --- 0. 設定・セキュリティ（自動ログイン機能付き） ---
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
 
 def check_password():
+    # 1. URLに認証トークンがあるかチェック（更新対策）
+    if st.query_params.get("auth") == "granted":
+        st.session_state['logged_in'] = True
+    
     if 'logged_in' not in st.session_state:
         st.session_state['logged_in'] = False
 
-    if st.session_state['logged_in']: return True
+    if st.session_state['logged_in']:
+        # サイドバーにログアウトボタン
+        if st.sidebar.button("ログアウト"):
+            st.session_state['logged_in'] = False
+            st.query_params.clear() # URLパラメータを消去
+            st.rerun()
+        return True
 
+    # ログイン画面
     st.markdown("### 🔒 PASS")
     password = st.text_input("", type="password", label_visibility="collapsed")
     if st.button("ENTER"):
         if password == st.secrets["general"]["APP_PASSWORD"]:
             st.session_state['logged_in'] = True
+            # ★ここでURLに認証情報を付与（これでリロードしても平気！）
+            st.query_params["auth"] = "granted"
             st.rerun()
         else:
             st.error("Access Denied")
@@ -39,7 +52,6 @@ def get_github_repo():
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_stock_name_cached(code):
-    """銘柄名取得（キャッシュ付き）"""
     code = str(code).strip()
     try:
         ticker = yf.Ticker(f"{code}.T")
@@ -96,7 +108,6 @@ def save_to_github_fast(filename, df):
         except: pass
 
 def recalculate_all(logs):
-    """全履歴リプレイ再計算"""
     sorted_logs = sorted(logs, key=lambda x: x['日付'])
     portfolio = {}
     processed_logs = []
@@ -107,7 +118,6 @@ def recalculate_all(logs):
         price = float(log['約定単価'])
         trade_type = log['区分']
         
-        # 名前解決
         log_name = log.get('銘柄名')
         current_name_in_port = portfolio.get(code, {}).get('name')
         
@@ -172,7 +182,6 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val):
         
         s.portfolio = new_port
         s.trade_log = new_logs
-        
         st.toast(f"✅ {name} {tx_type} 反映完了")
 
 def handle_buy():
@@ -246,12 +255,11 @@ def main():
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state.portfolio:
         rows = []
-        port_options = {} # シミュレータ用
+        port_options = {}
 
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            # 銘柄選択肢用に保存
             name = v.get('name', '-')
             port_options[code] = f"{name} ({code})"
 
@@ -271,38 +279,39 @@ def main():
             df.index = range(1, len(df) + 1)
             st.dataframe(df, use_container_width=True)
             
-            # ▼ 恩株シミュレーター (NEW!)
-            with st.expander("📈 恩株シミュレーター（ここを開く）", expanded=False):
-                st.info("保有している銘柄を選択すると、上昇率ごとに「何株売れば恩株化できるか」を計算します。")
+            # ▼ 恩株シミュレーター (100株単位対応版)
+            with st.expander("📈 恩株シミュレーター", expanded=False):
+                st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
                 selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
                 
                 if selected_code_display:
-                    # コード抽出
                     selected_code = selected_code_display.split("(")[-1].replace(")", "").strip()
                     target_data = st.session_state.portfolio[selected_code]
                     
                     avg = target_data['avg_price']
                     qty = target_data['qty']
                     realized = target_data['realized_pl']
-                    remaining_cost = (avg * qty) - realized # まだ回収できていないコスト
+                    remaining_cost = (avg * qty) - realized 
                     
                     if remaining_cost <= 0:
                          st.success("🎉 すでに恩株化達成済みです！")
                     else:
                         sim_rows = []
-                        # 上昇率パターン (0%から300%まで)
                         patterns = [0, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]
                         
                         for p in patterns:
                             target_price = avg * (1 + p/100)
                             
-                            # 回収に必要な売却額 / その時の株価 = 必要株数
-                            # (切り上げないと元本割れするので math.ceil を使う)
-                            needed_shares = math.ceil(remaining_cost / target_price)
+                            # 理論上の必要売却株数 (切り上げ)
+                            raw_needed_shares = math.ceil(remaining_cost / target_price)
                             
-                            remaining_shares = qty - needed_shares
+                            # ★ここで100株単位に切り上げる
+                            # (例: 130株必要 -> 200株)
+                            unit_needed_shares = math.ceil(raw_needed_shares / 100) * 100
                             
-                            if remaining_shares > 0:
+                            remaining_shares = qty - unit_needed_shares
+                            
+                            if remaining_shares >= 0:
                                 judge = f"✅ 残{remaining_shares}株"
                             else:
                                 judge = "❌ 不可"
@@ -310,7 +319,7 @@ def main():
                             sim_rows.append({
                                 "上昇率": f"+{p}%",
                                 "想定株価": f"{target_price:,.0f}円",
-                                "必要売却数": f"{needed_shares:,}株",
+                                "必要売却数": f"{unit_needed_shares:,}株", # 100株単位
                                 "恩株結果": judge
                             })
                         
@@ -321,30 +330,7 @@ def main():
 
     st.write("")
 
-    # ▼ 履歴
-    st.subheader("📜 全取引履歴")
-    if st.session_state.trade_log:
-        df_log = pd.DataFrame(st.session_state.trade_log)
-        if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
-        else: df_log["削除"] = False
-        
-        edited_df = st.data_editor(
-            df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
-            column_config={
-                "削除": st.column_config.CheckboxColumn("削除", width="small"),
-                "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
-                "数量": st.column_config.NumberColumn("数量", min_value=0),
-                "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
-                "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
-                "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
-            }
-        )
-        if st.button("💾 履歴の修正・削除を反映", type="secondary"):
-            handle_save_changes(edited_df)
-    
-    st.markdown("---")
-
-    # ▼ 💰 成功報酬管理エリア
+    # ▼ 💰 成功報酬管理エリア (ここに移動！)
     st.subheader("💰 成功報酬管理")
     
     total_realized_pl = sum([item['確定損益'] for item in st.session_state.trade_log]) if st.session_state.trade_log else 0
@@ -396,6 +382,29 @@ def main():
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
             </div>
             """, unsafe_allow_html=True)
+            
+    st.markdown("---")
+
+    # ▼ 履歴 (一番下に移動！)
+    st.subheader("📜 全取引履歴")
+    if st.session_state.trade_log:
+        df_log = pd.DataFrame(st.session_state.trade_log)
+        if "削除" not in df_log.columns: df_log.insert(0, "削除", False)
+        else: df_log["削除"] = False
+        
+        edited_df = st.data_editor(
+            df_log, num_rows="dynamic", use_container_width=True, hide_index=True,
+            column_config={
+                "削除": st.column_config.CheckboxColumn("削除", width="small"),
+                "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
+                "数量": st.column_config.NumberColumn("数量", min_value=0),
+                "約定単価": st.column_config.NumberColumn("約定単価", format="%d円"),
+                "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
+                "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
+            }
+        )
+        if st.button("💾 履歴の修正・削除を反映", type="secondary"):
+            handle_save_changes(edited_df)
 
 if __name__ == "__main__":
     main()
