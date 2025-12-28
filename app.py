@@ -24,7 +24,7 @@ def check_password():
             st.error("Access Denied")
     return False
 
-# --- GitHub接続 ---
+# --- GitHub接続 & 高速化ロジック ---
 def get_github_repo():
     try:
         token = st.secrets["general"]["GITHUB_TOKEN"]
@@ -35,12 +35,25 @@ def get_github_repo():
         st.error(f"Connection Error: {e}")
         return None
 
+# ★高速化ポイント1：銘柄名をキャッシュする（1日保持）
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_stock_name_cached(code):
+    try:
+        ticker = yf.Ticker(f"{code}.T")
+        # タイムアウト対策（早めに諦める）
+        return ticker.info.get('longName', '名称不明')
+    except:
+        return "名称不明"
+
 def load_csv_from_github(filename):
     repo = get_github_repo()
     if not repo: return {} if filename == 'portfolio.csv' else []
     
     try:
         file_content = repo.get_contents(filename)
+        # ★高速化ポイント2：SHA（ファイルの指紋）をセッションに保存しておく
+        st.session_state[f'{filename}_sha'] = file_content.sha
+        
         csv_data = file_content.decoded_content.decode("utf-8")
         df = pd.read_csv(io.StringIO(csv_data))
         
@@ -49,7 +62,6 @@ def load_csv_from_github(filename):
             return df.set_index('Code').to_dict(orient='index')
         else:
             df['証券コード'] = df['証券コード'].astype(str)
-            # 日付型変換
             df['日付'] = pd.to_datetime(df['日付']).dt.date
             return df.to_dict(orient='records')
     except:
@@ -63,30 +75,37 @@ def save_to_github(filename, df):
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
         content = csv_buffer.getvalue()
-        try:
-            file = repo.get_contents(filename)
-            repo.update_file(filename, f"Update {filename}", content, file.sha)
-        except:
-            repo.create_file(filename, f"Create {filename}", content)
+        
+        # ★高速化ポイント3：保存済みのSHAを使って、読み込みなしで即書き込み（楽観的更新）
+        sha = st.session_state.get(f'{filename}_sha')
+        
+        if sha:
+            try:
+                # SHAを指定して更新（一番速い）
+                commit = repo.update_file(filename, f"Update {filename}", content, sha)
+                # 新しいSHAを記憶更新
+                st.session_state[f'{filename}_sha'] = commit['content'].sha
+            except:
+                # 失敗したら（SHA不一致など）、従来通り取得してから更新
+                file = repo.get_contents(filename)
+                commit = repo.update_file(filename, f"Update {filename}", content, file.sha)
+                st.session_state[f'{filename}_sha'] = commit['content'].sha
+        else:
+            # 新規作成またはSHA不明時
+            try:
+                file = repo.get_contents(filename)
+                commit = repo.update_file(filename, f"Update {filename}", content, file.sha)
+                st.session_state[f'{filename}_sha'] = commit['content'].sha
+            except:
+                repo.create_file(filename, f"Create {filename}", content)
+                
     except Exception as e:
         st.error(f"Save Failed: {e}")
 
 # --- ロジック ---
-def get_stock_name(code):
-    try:
-        ticker = yf.Ticker(f"{code}.T")
-        return ticker.info.get('longName', '名称不明')
-    except:
-        return "名称不明"
-
 def recalculate_all(logs):
-    """
-    全履歴データからポートフォリオを「リプレイ（再計算）」する関数
-    これにより、過去データの修正が正しく現在に反映される
-    """
-    # 日付順（古い順）にソート
+    """リプレイ再計算"""
     sorted_logs = sorted(logs, key=lambda x: x['日付'])
-    
     portfolio = {}
     processed_logs = []
 
@@ -97,13 +116,10 @@ def recalculate_all(logs):
         trade_type = log['区分']
         name = log.get('銘柄名', '名称不明')
 
-        # 名前情報の補完（なければ取得はしない、重くなるから）
-        
         if trade_type == "買い" or trade_type == "新規買付" or trade_type == "買い増し":
             if code not in portfolio:
                 portfolio[code] = {'name': name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0}
             
-            # 加重平均計算
             current = portfolio[code]
             total_cost = (current['qty'] * current['avg_price']) + (qty * price)
             total_qty = current['qty'] + qty
@@ -111,21 +127,17 @@ def recalculate_all(logs):
             
             portfolio[code]['qty'] = total_qty
             portfolio[code]['avg_price'] = new_avg
-            portfolio[code]['name'] = name # 名前更新
+            portfolio[code]['name'] = name
             
-            # ログにもその時点の平均単価を記録（修正）
             log['平均単価'] = new_avg
             log['確定損益'] = 0
 
         elif trade_type == "売り" or trade_type == "売却":
             if code in portfolio:
                 current = portfolio[code]
-                # 利益計算
                 profit = (price - current['avg_price']) * qty
-                
                 portfolio[code]['qty'] = max(0, current['qty'] - qty)
                 portfolio[code]['realized_pl'] += profit
-                
                 log['平均単価'] = current['avg_price']
                 log['確定損益'] = profit
         
@@ -134,7 +146,6 @@ def recalculate_all(logs):
     return portfolio, processed_logs
 
 def add_stock_callback():
-    """新規入力時の処理"""
     input_date = st.session_state.input_date
     trade_type = st.session_state.input_type
     code = str(st.session_state.input_code)
@@ -143,56 +154,45 @@ def add_stock_callback():
     
     if not code or qty <= 0: return
 
-    # 銘柄名取得
-    current_port = st.session_state['portfolio']
-    stock_name = current_port[code]['name'] if code in current_port else get_stock_name(code)
-    
-    action = "買い" if trade_type == "買い" else "売り"
-    
-    # 新しいログを追加
-    new_log = {
-        '日付': input_date,
-        '区分': action,
-        '証券コード': code,
-        '銘柄名': stock_name,
-        '数量': qty,
-        '約定単価': price,
-        '平均単価': 0, # 後で計算
-        '確定損益': 0 # 後で計算
-    }
-    
-    # 既存ログに追加して、再計算を実行
-    st.session_state['trade_log'].append(new_log)
-    
-    # ★ここがミソ！全再計算してポートフォリオを作り直す
-    new_port, new_logs = recalculate_all(st.session_state['trade_log'])
-    
-    st.session_state['portfolio'] = new_port
-    st.session_state['trade_log'] = new_logs
-    
-    save_data_to_cloud()
+    # ★スピナーを表示して「動いてる感」を出す
+    with st.spinner('🚀 処理中...'):
+        current_port = st.session_state['portfolio']
+        # キャッシュ付き関数を使用
+        stock_name = current_port[code]['name'] if code in current_port else get_stock_name_cached(code)
+        
+        action = "買い" if trade_type == "買い" else "売り"
+        
+        new_log = {
+            '日付': input_date, '区分': action, '証券コード': code, '銘柄名': stock_name,
+            '数量': qty, '約定単価': price, '平均単価': 0, '確定損益': 0
+        }
+        
+        st.session_state['trade_log'].append(new_log)
+        new_port, new_logs = recalculate_all(st.session_state['trade_log'])
+        
+        st.session_state['portfolio'] = new_port
+        st.session_state['trade_log'] = new_logs
+        
+        save_data_to_cloud()
     
     st.session_state.input_code = ""
     st.session_state.input_qty = 0
     st.session_state.input_price = 0.0
-    st.session_state['system_msg'] = f"✅ {stock_name} のデータを反映しました"
+    st.session_state['system_msg'] = f"✅ {stock_name} 反映完了"
 
 def save_changes(edited_df):
-    """編集されたデータで再計算して保存"""
-    # データフレームを辞書リストに変換
-    logs = edited_df.to_dict(orient='records')
-    
-    # 再計算
-    new_port, new_logs = recalculate_all(logs)
-    
-    st.session_state['portfolio'] = new_port
-    st.session_state['trade_log'] = new_logs
-    save_data_to_cloud()
+    with st.spinner('💾 クラウドに保存中...'):
+        logs = edited_df.to_dict(orient='records')
+        new_port, new_logs = recalculate_all(logs)
+        st.session_state['portfolio'] = new_port
+        st.session_state['trade_log'] = new_logs
+        save_data_to_cloud()
     st.success("再計算して保存しました！")
 
 def init_session_state():
     if 'portfolio' not in st.session_state:
-        st.session_state['portfolio'] = load_csv_from_github('portfolio.csv')
+        with st.spinner('☁️ データ読み込み中...'):
+            st.session_state['portfolio'] = load_csv_from_github('portfolio.csv')
     if 'trade_log' not in st.session_state:
         st.session_state['trade_log'] = load_csv_from_github('trade_log.csv')
     if 'system_msg' not in st.session_state:
@@ -224,7 +224,7 @@ def main():
 
     st.markdown("---")
 
-    # 2. ポートフォリオ（恩株判定）
+    # 2. ポートフォリオ
     st.subheader("📊 現在のポートフォリオ")
     if st.session_state['portfolio']:
         data = []
@@ -237,7 +237,7 @@ def main():
             if not is_onkabu and v['qty'] > 0:
                 status = f"あと{int(remaining):,}円回収"
 
-            if v['qty'] > 0: # 保有0は非表示
+            if v['qty'] > 0: 
                 data.append({
                     '証券コード': c,
                     '銘柄名': v.get('name', 'Unknown'),
@@ -250,7 +250,6 @@ def main():
         
         if data:
             df_port = pd.DataFrame(data)
-            # 証券コード順にソート
             df_port = df_port.sort_values('証券コード')
             df_port.index = range(1, len(df_port) + 1)
             st.dataframe(df_port, use_container_width=True)
@@ -259,17 +258,16 @@ def main():
 
     st.write("") 
 
-    # 3. 履歴編集エリア（ここが新機能！）
+    # 3. 履歴編集
     st.subheader("📜 全取引履歴（修正・削除可能）")
-    st.caption("※データを直接書き換えて修正できます。行を選んでDeleteキーで削除も可能。修正後は必ず「保存＆再計算」を押してね。")
+    st.caption("※データを直接書き換えて修正できます。修正後は必ず「保存＆再計算」を押してね。")
 
     if st.session_state['trade_log']:
         df_log = pd.DataFrame(st.session_state['trade_log'])
         
-        # 編集用データフレーム設定
         edited_df = st.data_editor(
             df_log,
-            num_rows="dynamic", # 行の追加・削除を許可
+            num_rows="dynamic", 
             column_config={
                 "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                 "区分": st.column_config.SelectboxColumn("区分", options=["買い", "売り"]),
@@ -277,15 +275,13 @@ def main():
                 "約定単価": st.column_config.NumberColumn("約定単価", min_value=0, format="%.0f円"),
                 "証券コード": st.column_config.TextColumn("証券コード"),
                 "銘柄名": st.column_config.TextColumn("銘柄名"),
-                # 計算結果列は編集不可にする
-                "平均単価": st.column_config.NumberColumn("平均単価 (自動計算)", disabled=True),
-                "確定損益": st.column_config.NumberColumn("確定損益 (自動計算)", disabled=True),
+                "平均単価": st.column_config.NumberColumn("平均単価", disabled=True),
+                "確定損益": st.column_config.NumberColumn("確定損益", disabled=True),
             },
             use_container_width=True,
             hide_index=True
         )
 
-        # 変更検知ボタン
         if st.button("💾 修正内容を保存＆再計算する"):
             save_changes(edited_df)
     else:
