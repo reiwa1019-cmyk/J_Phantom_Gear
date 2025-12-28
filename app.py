@@ -431,20 +431,16 @@ def main():
         if total_pl < 0:
             loss = abs(total_pl)
             
-            # ★ロジック修正: ボーナス(未払)がある時だけ表示（プレッシャー用）
+            # ★ 修正: インデントを削除して1行で記述し、HTMLとして正しく認識させる
+            # ★ 修正: プレッシャー文言（～埋めるまで発生しません）を削除
             real_status_html = ""
             if bonus_base_profit > 0:
-                 real_status_html = f"""
-<hr style="border-color:#f5c6cb;">
-<h4 style="color: #0c5460; margin:0;">📉 実質マイナス (恩株込)</h4>
-<h2 style="color: #0c5460; margin:0;">¥ {int(real_status):,}</h2>
-"""
+                real_status_html = f"<hr style='border-color:#f5c6cb;'><h4 style='color: #0c5460; margin:0;'>📉 実質マイナス (恩株込)</h4><h2 style='color: #0c5460; margin:0;'>¥ {int(real_status):,}</h2>"
 
             st.markdown(f"""
 <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
     <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
     <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-    <p style="margin:0;">（このマイナスを埋めるまで報酬は発生しません）</p>
     {real_status_html}
 </div>""", unsafe_allow_html=True)
         else:
@@ -515,11 +511,34 @@ def main():
 
     st.write("")
 
-    # ▼ 🗄️ 過去データ詳細
+    # ▼ 🗄️ 過去データ詳細（色分け追加）
     with st.expander("🗄️ 過去データ詳細（参照用）"):
         past_df = load_csv_from_github('past_data.csv')
         if not isinstance(past_df, list) and not past_df.empty:
-            st.dataframe(past_df, use_container_width=True)
+            
+            # ★ 修正: 背景色の適用ロジックを追加
+            def highlight_past_data(row):
+                # 取引形態がある場合
+                if '取引形態' in row:
+                    val = str(row['取引形態'])
+                    if '利確' in val:
+                        return ['background-color: #ffe6e6; color: black'] * len(row) # 薄いピンク
+                    elif '損切' in val:
+                        return ['background-color: #e6f2ff; color: black'] * len(row) # 薄い青
+                
+                # なければ損益で判断
+                if '損益' in row:
+                    try:
+                        pl = float(row['損益'])
+                        if pl > 0:
+                            return ['background-color: #ffe6e6; color: black'] * len(row)
+                        elif pl < 0:
+                            return ['background-color: #e6f2ff; color: black'] * len(row)
+                    except: pass
+                
+                return [''] * len(row)
+
+            st.dataframe(past_df.style.apply(highlight_past_data, axis=1), use_container_width=True)
         else:
             st.info("past_data.csv が見つかりません。GitHubにアップロードしてください。")
 
