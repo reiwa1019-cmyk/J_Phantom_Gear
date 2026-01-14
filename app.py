@@ -6,8 +6,8 @@ import io
 import yfinance as yf
 import time
 import math
-import requests                 # 追加：ネット接続用
-from bs4 import BeautifulSoup   # 追加：HP解析用
+import requests
+from bs4 import BeautifulSoup
 
 # --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
@@ -55,13 +55,12 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-# ★高速化の肝: まとめて株価を取得する関数
+# ★高速化: まとめて株価を取得する関数
 @st.cache_data(ttl=600)  # 10分間キャッシュ
 def fetch_batch_prices(codes):
     """
     リストにある銘柄の現在値を一括取得する
     """
-    # 調整用コードなどは除外
     target_codes = [str(c).strip() for c in codes if str(c).strip() not in ["ADJUST", "PAYMENT"]]
     if not target_codes:
         return {}
@@ -69,53 +68,58 @@ def fetch_batch_prices(codes):
     tickers = [f"{c}.T" for c in target_codes]
     
     try:
-        # yfinanceで一括ダウンロード
         df = yf.download(tickers, period="1d", progress=False)['Close']
-        
         prices = {}
         
-        # 1銘柄だけの場合、SeriesになるのでDataFrameに変換
         if isinstance(df, pd.Series):
             df = df.to_frame(name=tickers[0])
             
-        # 最終行（最新価格）を取得
         if not df.empty:
             latest = df.iloc[-1]
             for t in tickers:
                 code = t.replace(".T", "")
                 val = latest.get(t)
-                # NaNチェック
                 if pd.notnull(val):
                     prices[code] = float(val)
                 else:
                     prices[code] = 0.0
         return prices
     except Exception as e:
-        # st.error(f"データ取得エラー: {e}") # うるさいのでコメントアウト
         return {}
 
-# ▼▼▼▼▼ ここを修正しました（Yahoo!ファイナンスから日本語名を取る機能） ▼▼▼▼▼
-@st.cache_data # ←何度も取りに行かないように記憶させる
-def get_stock_name_fallback(code):
+# ★新機能: Yahoo!ファイナンス(日本)から和名を取得する関数
+@st.cache_data(ttl=3600*24) # 名前は滅多に変わらないので1日キャッシュ
+def get_japanese_stock_name(code):
     """
-    Yahoo!ファイナンスから日本語の社名を取得する
+    Yahoo!ファイナンス(日本)をスクレイピングして和名を取得する
     """
+    code = str(code).strip()
+    if code in ["ADJUST", "PAYMENT"]: return code
+    
+    url = f"https://finance.yahoo.co.jp/quote/{code}.T"
+    
     try:
-        # 数字4桁以外はそのまま返す
-        if not str(code).isdigit():
-             return f"コード({code})"
-
-        url = f"https://finance.yahoo.co.jp/quote/{code}.T"
-        res = requests.get(url)
-        soup = BeautifulSoup(res.text, 'html.parser')
-        
-        # タイトル「トヨタ自動車【7203】...」から社名だけ抜く
-        title = soup.find('title').text
-        company_name = title.split('【')[0]
-        return company_name
+        # 日本のYahooにアクセス
+        res = requests.get(url, timeout=5)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # ページタイトルやh1から社名を抽出する（Yahooの構造に依存）
+            # 通常 <h1 class="...">トヨタ自動車(株)</h1> のようになっている
+            h1 = soup.select_one("h1")
+            if h1:
+                # 株価などの余計なテキストを除く簡易処理
+                name = h1.text.split("掲示板")[0].strip()
+                # (株)などが含まれるのでそのまま返す
+                return name
+    except:
+        pass
+    
+    # 失敗したらyfinanceで英語名を取るか、コードを返す
+    try:
+        t = yf.Ticker(f"{code}.T")
+        return t.info.get('longName', f"コード({code})")
     except:
         return f"コード({code})"
-# ▲▲▲▲▲ 修正完了 ▲▲▲▲▲
 
 def load_csv_from_github(filename):
     repo = get_github_repo()
@@ -191,6 +195,7 @@ def recalculate_all(logs):
         current_port_name = portfolio.get(code, {}).get('name')
         
         final_name = f"コード({code})"
+        # 既にまともな名前（日本語など）を持っていればそれを採用
         if current_port_name and "コード(" not in str(current_port_name):
             final_name = current_port_name
         elif log_name and "コード(" not in str(log_name):
@@ -256,8 +261,6 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
                 '確定損益': int(price_val), 'ボーナス': False
             }
         elif tx_type == "報酬精算":
-            # 報酬支払いは利益リセットではなく「支払記録」として扱う（利益を減算しない）
-            # ただし、元のロジックが「利益から減算してリセット」する仕様のようなのでそれに合わせます
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': "PAYMENT",
                 '銘柄名': "✅ 成功報酬精算完了", '数量': 0, '約定単価': 0, '平均単価': 0,
@@ -266,8 +269,9 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         else:
             if not code_val or qty_val <= 0: return
             code = str(code_val).strip()
-            # ここでは暫定名を入れる（再計算時にportfolioの名前があれば補正される）
-            name = get_stock_name_fallback(code) 
+            # ★ここで和名を取得しに行く
+            name = get_japanese_stock_name(code)
+            
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': code, '銘柄名': name,
                 '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0,
@@ -277,7 +281,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
         
-        # 名前情報の永続化: ポートフォリオ辞書が更新されているので保存
+        # 名前情報の永続化
         save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
         save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
         
@@ -304,7 +308,6 @@ def handle_adjust():
     s.adj_amount = 0.0
 
 def handle_payment_reset(profit_amount, is_bonus_payment):
-    # 支払額をマイナスとして記録し、見かけ上の利益を減らす（リセット）
     reset_amount = -1 * profit_amount
     execute_transaction("報酬精算", date.today(), "PAYMENT", 0, reset_amount, is_bonus_payment)
 
@@ -399,7 +402,6 @@ def main():
     
     total_onkabu_value = 0 
     
-    # ★ ここから高速化ロジック
     if st.session_state.portfolio:
         # 1. 保有中（数量>0）の銘柄リスト作成
         active_codes = [k for k, v in st.session_state.portfolio.items() if v['qty'] > 0]
@@ -415,11 +417,11 @@ def main():
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            # 保存されている名前を使う。なければ "コード(xxx)"
+            # 保存されている名前を使う。なければ和名取得を試みる
             name = v.get('name')
             if not name or "コード(" in name:
-                # 名前未取得ならここで再チャレンジして保存
-                name = get_stock_name_fallback(code)
+                # 名前未取得ならここで和名チャレンジ
+                name = get_japanese_stock_name(code)
                 st.session_state.portfolio[code]['name'] = name # メモリ上更新
             
             port_options[code] = f"{name} ({code})"
@@ -451,7 +453,6 @@ def main():
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
                 
-                # 前日比はBatchだと少し面倒なので今回は省略し、損益率重視
                 change_str = "---" 
                 
                 calc_base_price = v.get('original_avg', v['avg_price'])
