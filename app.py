@@ -382,7 +382,10 @@ def main():
     
     total_onkabu_value = 0 
     
-    # ★ ここから高速化ロジック
+    # ▼▼▼ 追加：合計計算用の変数 ▼▼▼
+    total_portfolio_cost = 0
+    total_portfolio_pl = 0
+    
     if st.session_state.portfolio:
         # 1. 保有中（数量>0）の銘柄リスト作成
         active_codes = [k for k, v in st.session_state.portfolio.items() if v['qty'] > 0]
@@ -432,6 +435,10 @@ def main():
             else:
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
+                
+                # ▼▼▼ 追加：合計に加算 ▼▼▼
+                total_portfolio_cost += cost
+                total_portfolio_pl += unrealized_pl
                 
                 # 前日比
                 mark_diff = "+" if diff > 0 else ""
@@ -483,6 +490,15 @@ def main():
                 df = pd.DataFrame(rows).sort_values('証券コード')
                 df.index = range(1, len(df) + 1)
                 st.dataframe(df, use_container_width=True)
+
+            # ▼▼▼ 追加：ここに合計を表示 ▼▼▼
+            st.markdown("---")
+            sum_c1, sum_c2 = st.columns(2)
+            with sum_c1:
+                st.metric("💰 総投資額 (保有元本)", f"¥{int(total_portfolio_cost):,}")
+            with sum_c2:
+                st.metric("📊 含み損益合計", f"¥{int(total_portfolio_pl):,}", delta=f"{int(total_portfolio_pl):,}")
+            st.markdown("---")
             
             with st.expander("📈 恩株シミュレーター（将来予測）", expanded=False):
                 st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
@@ -533,7 +549,7 @@ def main():
     # 恩株の損益
     bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
     
-    # ▼▼▼ 修正: マイナス合算（赤箱）に恩株利益も合算して相殺させる ▼▼▼
+    # マイナス合算（赤箱）に恩株利益も合算して相殺させる
     effective_aggregate_pl = standard_pl + bonus_base_profit
 
     # 実質損益（恩株の価値も含めた資産状況）
@@ -542,7 +558,7 @@ def main():
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
     
     with col_r1:
-        # 修正: 通常PLだけでなく、合算PLがマイナスの場合に赤箱を出す
+        # 通常PLだけでなく、合算PLがマイナスの場合に赤箱を出す
         if effective_aggregate_pl < 0:
             loss = abs(effective_aggregate_pl)
             st.markdown(f"""
@@ -570,12 +586,6 @@ def main():
             </div>""", unsafe_allow_html=True)
 
     with col_r2:
-        # 報酬は、マイナス合算が解消（effective_aggregate_pl > 0）してから発生するべきか、
-        # それとも赤字でも「恩株を作った」ことに対する報酬は発生するのか？
-        # 文脈的に「恩株が出ればその分の...15％の計算」とのことなので、
-        # マイナス合算があっても、恩株ボーナスは黄色い箱で請求できる仕様のままにします。
-        
-        # ただし通常報酬（青箱）はマイナス合算が消えてから
         if effective_aggregate_pl > 0:
             reward = effective_aggregate_pl * 0.15
             bg_color = "#d4edda" if reward > 10000 else "#f8f9fa"
