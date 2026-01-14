@@ -8,9 +8,10 @@ import time
 import math
 import requests
 from bs4 import BeautifulSoup
+import re # 日本語判定用
 
 # --- 0. 設定・セキュリティ ---
-st.set_page_config(page_title="成功報酬帳簿", layout="wide")
+st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
 
 def check_password():
     if 'user_role' not in st.session_state:
@@ -55,69 +56,59 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-# ★高速化: まとめて株価を取得する関数
-@st.cache_data(ttl=600)  # 10分間キャッシュ
+# ▼▼▼ 修正：前日比を出すために期間を延ばし、前日終値も取得する ▼▼▼
+@st.cache_data(ttl=600)
 def fetch_batch_prices(codes):
-    """
-    リストにある銘柄の現在値を一括取得する
-    """
     target_codes = [str(c).strip() for c in codes if str(c).strip() not in ["ADJUST", "PAYMENT"]]
-    if not target_codes:
-        return {}
+    if not target_codes: return {}
 
     tickers = [f"{c}.T" for c in target_codes]
     
     try:
-        df = yf.download(tickers, period="1d", progress=False)['Close']
-        prices = {}
+        # 前日比を計算したいので、少し長め(5日分)とって休日のズレを防ぐ
+        df = yf.download(tickers, period="5d", progress=False)['Close']
+        
+        data_map = {}
         
         if isinstance(df, pd.Series):
             df = df.to_frame(name=tickers[0])
             
         if not df.empty:
-            latest = df.iloc[-1]
+            # 最新の行（今日）と、その一つ前の行（前日）
+            latest_row = df.iloc[-1]
+            prev_row = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
+
             for t in tickers:
                 code = t.replace(".T", "")
-                val = latest.get(t)
+                val = latest_row.get(t)
+                prev_val = prev_row.get(t)
+
                 if pd.notnull(val):
-                    prices[code] = float(val)
+                    # 現在値と、前日比額をセットにする
+                    diff = float(val) - float(prev_val)
+                    data_map[code] = {'price': float(val), 'diff': diff}
                 else:
-                    prices[code] = 0.0
-        return prices
+                    data_map[code] = {'price': 0.0, 'diff': 0.0}
+        return data_map
     except Exception as e:
         return {}
 
-# ★新機能: Yahoo!ファイナンス(日本)から和名を取得する関数
-@st.cache_data(ttl=3600*24) # 名前は滅多に変わらないので1日キャッシュ
-def get_japanese_stock_name(code):
-    """
-    Yahoo!ファイナンス(日本)をスクレイピングして和名を取得する
-    """
-    code = str(code).strip()
-    if code in ["ADJUST", "PAYMENT"]: return code
-    
-    url = f"https://finance.yahoo.co.jp/quote/{code}.T"
-    
+# ▼▼▼ 修正：英語名が入っていても、日本語が含まれてなければ再取得する ▼▼▼
+def contains_japanese(text):
+    # ひらがな・カタカナ・漢字が含まれているかチェック
+    return bool(re.search(r'[ぁ-んァ-ン一-龥]', str(text)))
+
+@st.cache_data
+def get_stock_name_fallback(code):
     try:
-        # 日本のYahooにアクセス
-        res = requests.get(url, timeout=5)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            # ページタイトルやh1から社名を抽出する（Yahooの構造に依存）
-            # 通常 <h1 class="...">トヨタ自動車(株)</h1> のようになっている
-            h1 = soup.select_one("h1")
-            if h1:
-                # 株価などの余計なテキストを除く簡易処理
-                name = h1.text.split("掲示板")[0].strip()
-                # (株)などが含まれるのでそのまま返す
-                return name
-    except:
-        pass
-    
-    # 失敗したらyfinanceで英語名を取るか、コードを返す
-    try:
-        t = yf.Ticker(f"{code}.T")
-        return t.info.get('longName', f"コード({code})")
+        if not str(code).isdigit(): return f"コード({code})"
+
+        url = f"https://finance.yahoo.co.jp/quote/{code}.T"
+        res = requests.get(url)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        title = soup.find('title').text
+        company_name = title.split('【')[0]
+        return company_name
     except:
         return f"コード({code})"
 
@@ -190,12 +181,10 @@ def recalculate_all(logs):
         qty = int(log['数量'])
         price = float(log['約定単価'])
         
-        # ログにある名前 または ポートフォリオにある名前 を継承
         log_name = log.get('銘柄名')
         current_port_name = portfolio.get(code, {}).get('name')
         
         final_name = f"コード({code})"
-        # 既にまともな名前（日本語など）を持っていればそれを採用
         if current_port_name and "コード(" not in str(current_port_name):
             final_name = current_port_name
         elif log_name and "コード(" not in str(log_name):
@@ -206,8 +195,10 @@ def recalculate_all(logs):
                 portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0}
             
             cur = portfolio[code]
-            # 名前更新のチャンスがあれば更新
-            if "コード(" in cur['name'] and "コード(" not in final_name:
+            # 日本語名があれば優先して更新
+            if contains_japanese(final_name) and not contains_japanese(cur['name']):
+                 cur['name'] = final_name
+            elif "コード(" in cur['name'] and "コード(" not in final_name:
                 cur['name'] = final_name
 
             total_cost = (cur['qty'] * cur['avg_price']) + (qty * price)
@@ -269,9 +260,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         else:
             if not code_val or qty_val <= 0: return
             code = str(code_val).strip()
-            # ★ここで和名を取得しに行く
-            name = get_japanese_stock_name(code)
-            
+            name = get_stock_name_fallback(code) 
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': code, '銘柄名': name,
                 '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0,
@@ -281,7 +270,6 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
         
-        # 名前情報の永続化
         save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
         save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
         
@@ -402,13 +390,14 @@ def main():
     
     total_onkabu_value = 0 
     
+    # ★ ここから高速化ロジック
     if st.session_state.portfolio:
         # 1. 保有中（数量>0）の銘柄リスト作成
         active_codes = [k for k, v in st.session_state.portfolio.items() if v['qty'] > 0]
         
-        # 2. まとめて株価取得（ここが速い）
+        # 2. まとめて株価取得（前日比計算用に修正済み）
         with st.spinner("株価情報を一括取得中..."):
-            market_prices = fetch_batch_prices(active_codes)
+            market_data = fetch_batch_prices(active_codes)
         
         rows = []
         port_options = {}
@@ -417,17 +406,18 @@ def main():
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            # 保存されている名前を使う。なければ和名取得を試みる
+            # ▼▼▼ 修正：日本語が含まれていない場合は再取得させる ▼▼▼
             name = v.get('name')
-            if not name or "コード(" in name:
-                # 名前未取得ならここで和名チャレンジ
-                name = get_japanese_stock_name(code)
+            if not name or "コード(" in name or not contains_japanese(name):
+                name = get_stock_name_fallback(code)
                 st.session_state.portfolio[code]['name'] = name # メモリ上更新
             
             port_options[code] = f"{name} ({code})"
 
-            # 一括取得データから現在値を取り出す
-            current_price = market_prices.get(code, 0)
+            # 一括取得データからデータを取り出す
+            data = market_data.get(code, {'price': 0, 'diff': 0})
+            current_price = data['price']
+            diff = data['diff']
             
             cost = v['qty'] * v['avg_price']
             is_data_error = (current_price == 0)
@@ -453,7 +443,9 @@ def main():
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
                 
-                change_str = "---" 
+                # 前日比
+                mark_diff = "+" if diff > 0 else ""
+                change_str = f"{mark_diff}{int(diff)}"
                 
                 calc_base_price = v.get('original_avg', v['avg_price'])
                 if calc_base_price == 0: calc_base_price = v['avg_price']
@@ -482,6 +474,14 @@ def main():
                         mc1, mc2 = st.columns(2)
                         with mc1:
                             st.write(f"**現在値:** {row['現在値']}")
+                            
+                            # 前日比の色付け
+                            diff_val = row['前日比']
+                            if "+" in diff_val: color = "red"
+                            elif "-" in diff_val: color = "blue"
+                            else: color = "gray"
+                            st.markdown(f"<span style='color:{color}; font-size:0.9em'>前日比: {diff_val}</span>", unsafe_allow_html=True)
+
                             st.caption(f"平均: {row['平均取得単価']}円")
                         with mc2:
                             st.write(f"**含み損益:** {row['含み損益']}")
@@ -534,6 +534,10 @@ def main():
     df_calc = pd.DataFrame(st.session_state.trade_log) if st.session_state.trade_log else pd.DataFrame(columns=['確定損益', 'ボーナス'])
     if 'ボーナス' not in df_calc.columns: df_calc['ボーナス'] = False
     
+    # 調整額（ADJUST）だけ抜き出して計算
+    adjust_logs = df_calc[df_calc['証券コード'] == 'ADJUST']
+    adjust_total = adjust_logs['確定損益'].sum() if not adjust_logs.empty else 0
+
     total_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
     bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
     
@@ -548,6 +552,7 @@ def main():
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
                 <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
+                <p style="margin:0; font-size:0.8em; color:#721c24;">(内、過去調整額: ¥{int(adjust_total):,})</p>
             </div>""", unsafe_allow_html=True)
 
             if bonus_base_profit > 0:
