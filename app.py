@@ -382,7 +382,7 @@ def main():
     
     total_onkabu_value = 0 
     
-    # ▼▼▼ 追加：合計計算用の変数 ▼▼▼
+    # ▼▼▼ 合計計算用の変数 ▼▼▼
     total_portfolio_cost = 0
     total_portfolio_pl = 0
     
@@ -436,9 +436,10 @@ def main():
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
                 
-                # ▼▼▼ 追加：合計に加算 ▼▼▼
-                total_portfolio_cost += cost
-                total_portfolio_pl += unrealized_pl
+                # ▼▼▼ 修正：恩株（コスト0）の場合は合計計算に含めない ▼▼▼
+                if v['avg_price'] > 0:
+                    total_portfolio_cost += cost
+                    total_portfolio_pl += unrealized_pl
                 
                 # 前日比
                 mark_diff = "+" if diff > 0 else ""
@@ -491,13 +492,13 @@ def main():
                 df.index = range(1, len(df) + 1)
                 st.dataframe(df, use_container_width=True)
 
-            # ▼▼▼ 追加：ここに合計を表示 ▼▼▼
+            # ▼▼▼ ここに合計を表示（恩株除外済み） ▼▼▼
             st.markdown("---")
             sum_c1, sum_c2 = st.columns(2)
             with sum_c1:
-                st.metric("💰 総投資額 (保有元本)", f"¥{int(total_portfolio_cost):,}")
+                st.metric("💰 総投資額 (保有元本)", f"¥{int(total_portfolio_cost):,}", help="恩株（コスト0円）は除外しています")
             with sum_c2:
-                st.metric("📊 含み損益合計", f"¥{int(total_portfolio_pl):,}", delta=f"{int(total_portfolio_pl):,}")
+                st.metric("📊 含み損益合計 (運用中)", f"¥{int(total_portfolio_pl):,}", delta=f"{int(total_portfolio_pl):,}", help="恩株の含み益はここに含まれず、下の『実質マイナス』等の計算で考慮されます")
             st.markdown("---")
             
             with st.expander("📈 恩株シミュレーター（将来予測）", expanded=False):
