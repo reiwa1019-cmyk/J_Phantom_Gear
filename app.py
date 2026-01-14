@@ -8,7 +8,7 @@ import time
 import math
 import requests
 from bs4 import BeautifulSoup
-import re # 日本語判定用
+import re 
 
 # --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
@@ -56,7 +56,6 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-# ▼▼▼ 修正：前日比を出すために期間を延ばし、前日終値も取得する ▼▼▼
 @st.cache_data(ttl=600)
 def fetch_batch_prices(codes):
     target_codes = [str(c).strip() for c in codes if str(c).strip() not in ["ADJUST", "PAYMENT"]]
@@ -65,16 +64,13 @@ def fetch_batch_prices(codes):
     tickers = [f"{c}.T" for c in target_codes]
     
     try:
-        # 前日比を計算したいので、少し長め(5日分)とって休日のズレを防ぐ
         df = yf.download(tickers, period="5d", progress=False)['Close']
-        
         data_map = {}
         
         if isinstance(df, pd.Series):
             df = df.to_frame(name=tickers[0])
             
         if not df.empty:
-            # 最新の行（今日）と、その一つ前の行（前日）
             latest_row = df.iloc[-1]
             prev_row = df.iloc[-2] if len(df) >= 2 else df.iloc[-1]
 
@@ -84,7 +80,6 @@ def fetch_batch_prices(codes):
                 prev_val = prev_row.get(t)
 
                 if pd.notnull(val):
-                    # 現在値と、前日比額をセットにする
                     diff = float(val) - float(prev_val)
                     data_map[code] = {'price': float(val), 'diff': diff}
                 else:
@@ -93,9 +88,7 @@ def fetch_batch_prices(codes):
     except Exception as e:
         return {}
 
-# ▼▼▼ 修正：英語名が入っていても、日本語が含まれてなければ再取得する ▼▼▼
 def contains_japanese(text):
-    # ひらがな・カタカナ・漢字が含まれているかチェック
     return bool(re.search(r'[ぁ-んァ-ン一-龥]', str(text)))
 
 @st.cache_data
@@ -195,7 +188,6 @@ def recalculate_all(logs):
                 portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0}
             
             cur = portfolio[code]
-            # 日本語名があれば優先して更新
             if contains_japanese(final_name) and not contains_japanese(cur['name']):
                  cur['name'] = final_name
             elif "コード(" in cur['name'] and "コード(" not in final_name:
@@ -395,7 +387,7 @@ def main():
         # 1. 保有中（数量>0）の銘柄リスト作成
         active_codes = [k for k, v in st.session_state.portfolio.items() if v['qty'] > 0]
         
-        # 2. まとめて株価取得（前日比計算用に修正済み）
+        # 2. まとめて株価取得
         with st.spinner("株価情報を一括取得中..."):
             market_data = fetch_batch_prices(active_codes)
         
@@ -406,7 +398,6 @@ def main():
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            # ▼▼▼ 修正：日本語が含まれていない場合は再取得させる ▼▼▼
             name = v.get('name')
             if not name or "コード(" in name or not contains_japanese(name):
                 name = get_stock_name_fallback(code)
@@ -414,7 +405,6 @@ def main():
             
             port_options[code] = f"{name} ({code})"
 
-            # 一括取得データからデータを取り出す
             data = market_data.get(code, {'price': 0, 'diff': 0})
             current_price = data['price']
             diff = data['diff']
@@ -475,7 +465,6 @@ def main():
                         with mc1:
                             st.write(f"**現在値:** {row['現在値']}")
                             
-                            # 前日比の色付け
                             diff_val = row['前日比']
                             if "+" in diff_val: color = "red"
                             elif "-" in diff_val: color = "blue"
@@ -541,7 +530,8 @@ def main():
     total_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
     bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
     
-    real_status = total_pl + total_onkabu_value
+    # ▼▼▼ 修正: 実質損益にボーナス（恩株）利益も加える ▼▼▼
+    real_status = total_pl + total_onkabu_value + bonus_base_profit
     
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
     
@@ -555,11 +545,13 @@ def main():
                 <p style="margin:0; font-size:0.8em; color:#721c24;">(内、過去調整額: ¥{int(adjust_total):,})</p>
             </div>""", unsafe_allow_html=True)
 
-            if bonus_base_profit > 0:
+            # 実質マイナスの表示条件を緩和（どちらかがプラスなら表示する）
+            if bonus_base_profit > 0 or total_onkabu_value > 0:
                 st.markdown(f"""
                 <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; border: 2px solid #ffeeba; margin-top: 10px;">
                     <h5 style="color: #856404; margin:0;">📉 実質マイナス (恩株込)</h5>
                     <h2 style="color: #856404; margin:0;">¥ {int(real_status):,}</h2>
+                    <p style="margin:0; font-size:0.8em; color:#856404;">(確定恩株益 ¥{int(bonus_base_profit):,} を合算)</p>
                 </div>
                 """, unsafe_allow_html=True)
         else:
