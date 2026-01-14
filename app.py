@@ -6,6 +6,8 @@ import io
 import yfinance as yf
 import time
 import math
+import requests                 # 追加：ネット接続用
+from bs4 import BeautifulSoup   # 追加：HP解析用
 
 # --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="成功報酬帳簿", layout="wide")
@@ -92,17 +94,28 @@ def fetch_batch_prices(codes):
         # st.error(f"データ取得エラー: {e}") # うるさいのでコメントアウト
         return {}
 
-# 個別に詳細を取る関数（名前取得用・予備）
+# ▼▼▼▼▼ ここを修正しました（Yahoo!ファイナンスから日本語名を取る機能） ▼▼▼▼▼
+@st.cache_data # ←何度も取りに行かないように記憶させる
 def get_stock_name_fallback(code):
+    """
+    Yahoo!ファイナンスから日本語の社名を取得する
+    """
     try:
-        t = yf.Ticker(f"{code}.T")
-        info = t.info
-        name = info.get('longName')
-        if not name: name = info.get('shortName')
-        if not name: name = f"コード({code})"
-        return name
+        # 数字4桁以外はそのまま返す
+        if not str(code).isdigit():
+             return f"コード({code})"
+
+        url = f"https://finance.yahoo.co.jp/quote/{code}.T"
+        res = requests.get(url)
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        # タイトル「トヨタ自動車【7203】...」から社名だけ抜く
+        title = soup.find('title').text
+        company_name = title.split('【')[0]
+        return company_name
     except:
         return f"コード({code})"
+# ▲▲▲▲▲ 修正完了 ▲▲▲▲▲
 
 def load_csv_from_github(filename):
     repo = get_github_repo()
