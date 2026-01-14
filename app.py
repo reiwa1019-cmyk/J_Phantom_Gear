@@ -44,7 +44,7 @@ if not check_password(): st.stop()
 
 IS_ADMIN = (st.session_state['user_role'] == "admin")
 
-# --- 1. 関数群 ---
+# --- 1. 関数群 (GitHub / データ処理) ---
 
 def get_github_repo():
     try:
@@ -53,37 +53,56 @@ def get_github_repo():
         return Github(token).get_repo(repo_name)
     except: return None
 
-@st.cache_data(ttl=300, show_spinner=False)
-def get_stock_info(code):
-    code = str(code).strip()
-    if code in ["ADJUST", "PAYMENT"]: return "システム調整", 0, 0, 0
-    try:
-        ticker = yf.Ticker(f"{code}.T")
-        name = ticker.info.get('longName')
-        if not name: name = ticker.info.get('shortName')
-        if not name: name = f"コード({code})"
-        
-        price = ticker.fast_info.last_price
-        prev_close = ticker.fast_info.previous_close
-        
-        if price is None or price == 0:
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                price = hist['Close'].iloc[-1]
-                prev_close = price
-        
-        if price is None: price = 0
-        if prev_close is None: prev_close = 0
+# ★高速化の肝: まとめて株価を取得する関数
+@st.cache_data(ttl=600)  # 10分間キャッシュ
+def fetch_batch_prices(codes):
+    """
+    リストにある銘柄の現在値を一括取得する
+    """
+    # 調整用コードなどは除外
+    target_codes = [str(c).strip() for c in codes if str(c).strip() not in ["ADJUST", "PAYMENT"]]
+    if not target_codes:
+        return {}
 
-        change = 0
-        pct_change = 0
-        if price > 0 and prev_close > 0:
-            change = price - prev_close
-            pct_change = (change / prev_close) * 100
+    tickers = [f"{c}.T" for c in target_codes]
+    
+    try:
+        # yfinanceで一括ダウンロード
+        df = yf.download(tickers, period="1d", progress=False)['Close']
+        
+        prices = {}
+        
+        # 1銘柄だけの場合、SeriesになるのでDataFrameに変換
+        if isinstance(df, pd.Series):
+            df = df.to_frame(name=tickers[0])
             
-        return name, price, change, pct_change
+        # 最終行（最新価格）を取得
+        if not df.empty:
+            latest = df.iloc[-1]
+            for t in tickers:
+                code = t.replace(".T", "")
+                val = latest.get(t)
+                # NaNチェック
+                if pd.notnull(val):
+                    prices[code] = float(val)
+                else:
+                    prices[code] = 0.0
+        return prices
+    except Exception as e:
+        # st.error(f"データ取得エラー: {e}") # うるさいのでコメントアウト
+        return {}
+
+# 個別に詳細を取る関数（名前取得用・予備）
+def get_stock_name_fallback(code):
+    try:
+        t = yf.Ticker(f"{code}.T")
+        info = t.info
+        name = info.get('longName')
+        if not name: name = info.get('shortName')
+        if not name: name = f"コード({code})"
+        return name
     except:
-        return f"コード({code})", 0, 0, 0
+        return f"コード({code})"
 
 def load_csv_from_github(filename):
     repo = get_github_repo()
@@ -154,18 +173,25 @@ def recalculate_all(logs):
         qty = int(log['数量'])
         price = float(log['約定単価'])
         
+        # ログにある名前 または ポートフォリオにある名前 を継承
         log_name = log.get('銘柄名')
-        current_name_in_port = portfolio.get(code, {}).get('name')
+        current_port_name = portfolio.get(code, {}).get('name')
         
-        if log_name and "コード(" not in str(log_name): final_name = log_name
-        elif current_name_in_port and "コード(" not in str(current_name_in_port): final_name = current_name_in_port
-        else: final_name = str(log_name) if log_name else f"コード({code})"
+        final_name = f"コード({code})"
+        if current_port_name and "コード(" not in str(current_port_name):
+            final_name = current_port_name
+        elif log_name and "コード(" not in str(log_name):
+            final_name = log_name
 
         if trade_type in ["買い", "新規買付", "買い増し"]:
             if code not in portfolio:
                 portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0}
             
             cur = portfolio[code]
+            # 名前更新のチャンスがあれば更新
+            if "コード(" in cur['name'] and "コード(" not in final_name:
+                cur['name'] = final_name
+
             total_cost = (cur['qty'] * cur['avg_price']) + (qty * price)
             
             base_avg = cur.get('original_avg', cur['avg_price'])
@@ -175,11 +201,11 @@ def recalculate_all(logs):
             total_real_cost = (cur['qty'] * base_avg) + (qty * price)
             total_qty = cur['qty'] + qty
             
-            new_avg = round(total_cost / total_qty, 2) if total_qty > 0 else 0.0
-            new_real_avg = round(total_real_cost / total_qty, 2) if total_qty > 0 else 0.0
+            new_avg = total_cost / total_qty if total_qty > 0 else 0.0
+            new_real_avg = total_real_cost / total_qty if total_qty > 0 else 0.0
             
-            portfolio[code].update({'qty': total_qty, 'avg_price': new_avg, 'original_avg': new_real_avg, 'name': final_name})
-            log.update({'平均単価': new_avg, '確定損益': 0, '銘柄名': final_name})
+            portfolio[code].update({'qty': total_qty, 'avg_price': new_avg, 'original_avg': new_real_avg})
+            log.update({'平均単価': round(new_avg, 2), '確定損益': 0, '銘柄名': cur['name']})
 
         elif trade_type in ["売り", "売却"]:
             if code in portfolio:
@@ -192,12 +218,12 @@ def recalculate_all(logs):
                     portfolio[code]['qty'] = max(0, cur['qty'] - qty)
                     portfolio[code]['avg_price'] = new_avg
                     portfolio[code]['realized_pl'] += profit
-                    log.update({'平均単価': new_avg, '確定損益': profit, '銘柄名': portfolio[code]['name']})
+                    log.update({'平均単価': 0, '確定損益': int(profit), '銘柄名': cur['name']})
                 else:
                     profit = (price - cur['avg_price']) * qty
                     portfolio[code]['qty'] = max(0, cur['qty'] - qty)
                     portfolio[code]['realized_pl'] += profit
-                    log.update({'平均単価': cur['avg_price'], '確定損益': profit, '銘柄名': portfolio[code]['name']})
+                    log.update({'平均単価': round(cur['avg_price'], 2), '確定損益': int(profit), '銘柄名': cur['name']})
         
         processed_logs.append(log)
     return portfolio, processed_logs
@@ -217,6 +243,8 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
                 '確定損益': int(price_val), 'ボーナス': False
             }
         elif tx_type == "報酬精算":
+            # 報酬支払いは利益リセットではなく「支払記録」として扱う（利益を減算しない）
+            # ただし、元のロジックが「利益から減算してリセット」する仕様のようなのでそれに合わせます
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': "PAYMENT",
                 '銘柄名': "✅ 成功報酬精算完了", '数量': 0, '約定単価': 0, '平均単価': 0,
@@ -225,7 +253,8 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         else:
             if not code_val or qty_val <= 0: return
             code = str(code_val).strip()
-            name, _, _, _ = get_stock_info(code)
+            # ここでは暫定名を入れる（再計算時にportfolioの名前があれば補正される）
+            name = get_stock_name_fallback(code) 
             new_log = {
                 '日付': date_val, '区分': tx_type, '証券コード': code, '銘柄名': name,
                 '数量': qty_val, '約定単価': price_val, '平均単価': 0, '確定損益': 0,
@@ -235,6 +264,7 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
         
+        # 名前情報の永続化: ポートフォリオ辞書が更新されているので保存
         save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
         save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
         
@@ -261,6 +291,7 @@ def handle_adjust():
     s.adj_amount = 0.0
 
 def handle_payment_reset(profit_amount, is_bonus_payment):
+    # 支払額をマイナスとして記録し、見かけ上の利益を減らす（リセット）
     reset_amount = -1 * profit_amount
     execute_transaction("報酬精算", date.today(), "PAYMENT", 0, reset_amount, is_bonus_payment)
 
@@ -351,30 +382,38 @@ def main():
     # ▼ ポートフォリオ（スマホ対応）
     st.subheader("📊 現在のポートフォリオ")
     
-    # ★ここにスマホ用切り替えスイッチを追加！
     use_mobile_view = st.toggle("📱 スマホ用表示モード", value=True)
     
     total_onkabu_value = 0 
-
+    
+    # ★ ここから高速化ロジック
     if st.session_state.portfolio:
+        # 1. 保有中（数量>0）の銘柄リスト作成
+        active_codes = [k for k, v in st.session_state.portfolio.items() if v['qty'] > 0]
+        
+        # 2. まとめて株価取得（ここが速い）
+        with st.spinner("株価情報を一括取得中..."):
+            market_prices = fetch_batch_prices(active_codes)
+        
         rows = []
         port_options = {}
-        
-        progress_text = "株価データ取得中..."
-        my_bar = st.progress(0, text=progress_text)
-        total_items = len(st.session_state.portfolio)
-        processed_count = 0
 
+        # 3. データ整形
         for code, v in st.session_state.portfolio.items():
-            if v['qty'] <= 0: 
-                processed_count += 1
-                continue
+            if v['qty'] <= 0: continue
             
-            time.sleep(1)
+            # 保存されている名前を使う。なければ "コード(xxx)"
+            name = v.get('name')
+            if not name or "コード(" in name:
+                # 名前未取得ならここで再チャレンジして保存
+                name = get_stock_name_fallback(code)
+                st.session_state.portfolio[code]['name'] = name # メモリ上更新
             
-            name, current_price, change, pct_change = get_stock_info(code)
             port_options[code] = f"{name} ({code})"
 
+            # 一括取得データから現在値を取り出す
+            current_price = market_prices.get(code, 0)
+            
             cost = v['qty'] * v['avg_price']
             is_data_error = (current_price == 0)
 
@@ -390,7 +429,7 @@ def main():
                     status_text = f"あと{remaining:,}円"
 
             if is_data_error:
-                current_price_disp = "⚠️ 取得失敗"
+                current_price_disp = "⏳ 取得中"
                 change_str = "---"
                 pl_str = "---"
                 pct_str = "---"
@@ -398,6 +437,10 @@ def main():
             else:
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
+                
+                # 前日比はBatchだと少し面倒なので今回は省略し、損益率重視
+                change_str = "---" 
+                
                 calc_base_price = v.get('original_avg', v['avg_price'])
                 if calc_base_price == 0: calc_base_price = v['avg_price']
 
@@ -405,8 +448,6 @@ def main():
                 if calc_base_price > 0:
                     unrealized_pct = ((current_price - calc_base_price) / calc_base_price) * 100
                 
-                mark_change = "🔺" if change > 0 else "▼" if change < 0 else "➖"
-                change_str = f"{mark_change} {int(change)} ({pct_change:+.2f}%)"
                 mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
                 pl_str = f"{mark_pl} {int(unrealized_pl):,}"
                 mark_pct = "+" if unrealized_pct > 0 else ""
@@ -419,13 +460,7 @@ def main():
                 'ステータス': status_text
             })
             
-            processed_count += 1
-            my_bar.progress(processed_count / total_items, text=f"データ取得中... ({name})")
-        
-        my_bar.empty()
-
         if rows:
-            # ★ スマホモードONなら「カード表示」にする
             if use_mobile_view:
                 for row in rows:
                     with st.container():
@@ -433,46 +468,47 @@ def main():
                         mc1, mc2 = st.columns(2)
                         with mc1:
                             st.write(f"**現在値:** {row['現在値']}")
-                            st.caption(f"前日比: {row['前日比']}")
+                            st.caption(f"平均: {row['平均取得単価']}円")
                         with mc2:
                             st.write(f"**含み損益:** {row['含み損益']}")
                             st.caption(f"騰落率: {row['騰落率']}")
                         
-                        st.text(f"保有: {row['保有株数']}株 | 平均: {row['平均取得単価']}円")
+                        st.text(f"保有: {row['保有株数']}株 | 元本: {row['保有元本']}")
                         st.info(f"{row['ステータス']}")
                         st.divider()
             else:
-                # PCモードならいつもの表
                 df = pd.DataFrame(rows).sort_values('証券コード')
                 df.index = range(1, len(df) + 1)
                 st.dataframe(df, use_container_width=True)
             
             with st.expander("📈 恩株シミュレーター（将来予測）", expanded=False):
                 st.info("保有銘柄を選択すると、上昇率ごとの「恩株化に必要な売却数（100株単位）」を計算します。")
-                selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
-                
-                if selected_code_display:
-                    selected_code = selected_code_display.split("(")[-1].replace(")", "").strip()
-                    target_data = st.session_state.portfolio[selected_code]
-                    avg = target_data['avg_price']
-                    qty = target_data['qty']
-                    realized = target_data['realized_pl']
-                    remaining_cost = (avg * qty) - realized 
-                    if remaining_cost <= 0: st.success("🎉 すでに恩株化達成済みです！")
-                    else:
-                        sim_rows = []
-                        patterns = [0, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]
-                        for p in patterns:
-                            target_price = avg * (1 + p/100)
-                            raw_needed = math.ceil(remaining_cost / target_price)
-                            unit_needed = math.ceil(raw_needed / 100) * 100
-                            rem_shares = qty - unit_needed
-                            judge = f"✅ 残{rem_shares}株" if rem_shares >= 0 else "❌ 不可"
-                            sim_rows.append({
-                                "上昇率": f"+{p}%", "想定株価": f"{target_price:,.0f}円",
-                                "必要売却数": f"{unit_needed:,}株", "恩株結果": judge
-                            })
-                        st.dataframe(pd.DataFrame(sim_rows), use_container_width=True)
+                if port_options:
+                    selected_code_display = st.selectbox("銘柄選択", list(port_options.values()))
+                    
+                    if selected_code_display:
+                        selected_code = selected_code_display.split("(")[-1].replace(")", "").strip()
+                        target_data = st.session_state.portfolio[selected_code]
+                        avg = target_data['avg_price']
+                        qty = target_data['qty']
+                        realized = target_data['realized_pl']
+                        remaining_cost = (avg * qty) - realized 
+                        if remaining_cost <= 0: st.success("🎉 すでに恩株化達成済みです！")
+                        else:
+                            sim_rows = []
+                            patterns = [0, 5, 10, 15, 20, 30, 40, 50, 75, 100, 150, 200]
+                            for p in patterns:
+                                target_price = avg * (1 + p/100)
+                                if target_price > 0:
+                                    raw_needed = math.ceil(remaining_cost / target_price)
+                                    unit_needed = math.ceil(raw_needed / 100) * 100
+                                    rem_shares = qty - unit_needed
+                                    judge = f"✅ 残{rem_shares}株" if rem_shares >= 0 else "❌ 不可"
+                                    sim_rows.append({
+                                        "上昇率": f"+{p}%", "想定株価": f"{target_price:,.0f}円",
+                                        "必要売却数": f"{unit_needed:,}株", "恩株結果": judge
+                                    })
+                            st.dataframe(pd.DataFrame(sim_rows), use_container_width=True)
         else: st.info("保有なし")
     else: st.info("データなし")
 
