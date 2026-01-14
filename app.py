@@ -527,31 +527,38 @@ def main():
     adjust_logs = df_calc[df_calc['証券コード'] == 'ADJUST']
     adjust_total = adjust_logs['確定損益'].sum() if not adjust_logs.empty else 0
 
-    total_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
+    # 通常取引の損益（調整額含む）
+    standard_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
+    
+    # 恩株の損益
     bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
     
-    # ▼▼▼ 修正: 実質損益にボーナス（恩株）利益も加える ▼▼▼
-    real_status = total_pl + total_onkabu_value + bonus_base_profit
+    # ▼▼▼ 修正: マイナス合算（赤箱）に恩株利益も合算して相殺させる ▼▼▼
+    effective_aggregate_pl = standard_pl + bonus_base_profit
+
+    # 実質損益（恩株の価値も含めた資産状況）
+    real_status = effective_aggregate_pl + total_onkabu_value
     
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
     
     with col_r1:
-        if total_pl < 0:
-            loss = abs(total_pl)
+        # 修正: 通常PLだけでなく、合算PLがマイナスの場合に赤箱を出す
+        if effective_aggregate_pl < 0:
+            loss = abs(effective_aggregate_pl)
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
                 <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-                <p style="margin:0; font-size:0.8em; color:#721c24;">(内、過去調整額: ¥{int(adjust_total):,})</p>
+                <p style="margin:0; font-size:0.8em; color:#721c24;">(通常: ¥{int(standard_pl):,} + 恩株益: ¥{int(bonus_base_profit):,})</p>
             </div>""", unsafe_allow_html=True)
 
-            # 実質マイナスの表示条件を緩和（どちらかがプラスなら表示する）
-            if bonus_base_profit > 0 or total_onkabu_value > 0:
+            # 実質マイナス（恩株価値込み）
+            if total_onkabu_value > 0:
                 st.markdown(f"""
                 <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; border: 2px solid #ffeeba; margin-top: 10px;">
-                    <h5 style="color: #856404; margin:0;">📉 実質マイナス (恩株込)</h5>
+                    <h5 style="color: #856404; margin:0;">📉 実質マイナス (恩株価値込)</h5>
                     <h2 style="color: #856404; margin:0;">¥ {int(real_status):,}</h2>
-                    <p style="margin:0; font-size:0.8em; color:#856404;">(確定恩株益 ¥{int(bonus_base_profit):,} を合算)</p>
+                    <p style="margin:0; font-size:0.8em; color:#856404;">(保有恩株価値 ¥{int(total_onkabu_value):,} を合算)</p>
                 </div>
                 """, unsafe_allow_html=True)
         else:
@@ -559,12 +566,18 @@ def main():
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
                 <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-                <p style="margin:0;">(現在: +¥{int(total_pl):,})</p>
+                <p style="margin:0;">(現在: +¥{int(effective_aggregate_pl):,})</p>
             </div>""", unsafe_allow_html=True)
 
     with col_r2:
-        if total_pl > 0:
-            reward = total_pl * 0.15
+        # 報酬は、マイナス合算が解消（effective_aggregate_pl > 0）してから発生するべきか、
+        # それとも赤字でも「恩株を作った」ことに対する報酬は発生するのか？
+        # 文脈的に「恩株が出ればその分の...15％の計算」とのことなので、
+        # マイナス合算があっても、恩株ボーナスは黄色い箱で請求できる仕様のままにします。
+        
+        # ただし通常報酬（青箱）はマイナス合算が消えてから
+        if effective_aggregate_pl > 0:
+            reward = effective_aggregate_pl * 0.15
             bg_color = "#d4edda" if reward > 10000 else "#f8f9fa"
             title_text = "🎉 成功報酬請求額 (15%)" if reward > 10000 else "成功報酬 (1万円以下)"
             st.markdown(f"""
@@ -575,12 +588,13 @@ def main():
             
             if reward > 10000 and IS_ADMIN:
                 if st.button("💸 通常報酬の支払い完了（リセット）", type="primary"):
-                    handle_payment_reset(total_pl, False)
+                    handle_payment_reset(effective_aggregate_pl, False)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
-                <h3 style="color: #6c757d; margin:0;">成功報酬請求額</h3>
+                <h3 style="color: #6c757d; margin:0;">通常成功報酬</h3>
                 <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+                <p style="margin:0; font-size:0.8em; color:#6c757d;">(マイナス合算中)</p>
             </div>""", unsafe_allow_html=True)
 
     with col_r3:
