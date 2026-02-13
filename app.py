@@ -80,7 +80,6 @@ def fetch_batch_prices(codes):
                 prev_val = prev_row.get(t)
 
                 if pd.notnull(val):
-                    # ここでfloat変換しておく
                     val_f = float(val)
                     prev_f = float(prev_val) if pd.notnull(prev_val) else val_f
                     diff = val_f - prev_f
@@ -101,9 +100,15 @@ def get_stock_name_fallback(code):
 
         url = f"https://finance.yahoo.co.jp/quote/{code}.T"
         res = requests.get(url)
+        # ▼▼▼ 修正箇所：文字コードをUTF-8に強制指定して文字化けを防ぐ ▼▼▼
+        res.encoding = "utf-8" 
+        
         soup = BeautifulSoup(res.text, 'html.parser')
         title = soup.find('title').text
         company_name = title.split('【')[0]
+        # Yahoo! JAPANなどが含まれる場合があるので、整形
+        company_name = company_name.replace(" - Yahoo!ファイナンス", "").strip()
+        
         return company_name
     except:
         return f"コード({code})"
@@ -405,6 +410,7 @@ def main():
             if v['qty'] <= 0: continue
             
             name = v.get('name')
+            # 日本語名が入っていない場合、取得しに行くロジック
             if not name or "コード(" in name or not contains_japanese(name):
                 name = get_stock_name_fallback(code)
                 st.session_state.portfolio[code]['name'] = name # メモリ上更新
@@ -439,7 +445,7 @@ def main():
                 current_price_disp = f"{int(current_price):,}円"
                 unrealized_pl = (current_price - v['avg_price']) * v['qty']
                 
-                # ▼▼▼ 修正：恩株（コスト0）の場合は合計計算に含めない ▼▼▼
+                # 恩株（コスト0）の場合は合計計算に含めない
                 if v['avg_price'] > 0:
                     total_portfolio_cost += cost
                     total_portfolio_pl += unrealized_pl
@@ -501,7 +507,7 @@ def main():
                 df.index = range(1, len(df) + 1)
                 st.dataframe(df, use_container_width=True)
 
-            # ▼▼▼ ここに合計を表示（恩株除外済み） ▼▼▼
+            # 合計計算
             st.markdown("---")
             sum_c1, sum_c2 = st.columns(2)
             with sum_c1:
@@ -549,26 +555,18 @@ def main():
     df_calc = pd.DataFrame(st.session_state.trade_log) if st.session_state.trade_log else pd.DataFrame(columns=['確定損益', 'ボーナス'])
     if 'ボーナス' not in df_calc.columns: df_calc['ボーナス'] = False
     
-    # 調整額（ADJUST）だけ抜き出して計算
     adjust_logs = df_calc[df_calc['証券コード'] == 'ADJUST']
     adjust_total = adjust_logs['確定損益'].sum() if not adjust_logs.empty else 0
 
-    # 通常取引の損益（調整額含む）
     standard_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
-    
-    # 恩株の損益
     bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
-    
-    # マイナス合算（赤箱）に恩株利益も合算して相殺させる
     effective_aggregate_pl = standard_pl + bonus_base_profit
 
-    # 実質損益（恩株の価値も含めた資産状況）
     real_status = effective_aggregate_pl + total_onkabu_value
     
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
     
     with col_r1:
-        # 通常PLだけでなく、合算PLがマイナスの場合に赤箱を出す
         if effective_aggregate_pl < 0:
             loss = abs(effective_aggregate_pl)
             st.markdown(f"""
@@ -578,7 +576,6 @@ def main():
                 <p style="margin:0; font-size:0.8em; color:#721c24;">(通常: ¥{int(standard_pl):,} + 恩株益: ¥{int(bonus_base_profit):,})</p>
             </div>""", unsafe_allow_html=True)
 
-            # 実質マイナス（恩株価値込み）
             if total_onkabu_value > 0:
                 st.markdown(f"""
                 <div style="background-color: #fff3cd; padding: 15px; border-radius: 10px; border: 2px solid #ffeeba; margin-top: 10px;">
