@@ -80,8 +80,11 @@ def fetch_batch_prices(codes):
                 prev_val = prev_row.get(t)
 
                 if pd.notnull(val):
-                    diff = float(val) - float(prev_val)
-                    data_map[code] = {'price': float(val), 'diff': diff}
+                    # ここでfloat変換しておく
+                    val_f = float(val)
+                    prev_f = float(prev_val) if pd.notnull(prev_val) else val_f
+                    diff = val_f - prev_f
+                    data_map[code] = {'price': val_f, 'diff': diff}
                 else:
                     data_map[code] = {'price': 0.0, 'diff': 0.0}
         return data_map
@@ -441,9 +444,15 @@ def main():
                     total_portfolio_cost += cost
                     total_portfolio_pl += unrealized_pl
                 
-                # 前日比
-                mark_diff = "+" if diff > 0 else ""
-                change_str = f"{mark_diff}{int(diff)}"
+                # 前日比（エラー回避修正済み）
+                try:
+                    if math.isnan(diff) or math.isinf(diff):
+                        change_str = "---"
+                    else:
+                        mark_diff = "+" if diff > 0 else ""
+                        change_str = f"{mark_diff}{int(diff)}"
+                except:
+                    change_str = "---"
                 
                 calc_base_price = v.get('original_avg', v['avg_price'])
                 if calc_base_price == 0: calc_base_price = v['avg_price']
