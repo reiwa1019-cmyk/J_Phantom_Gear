@@ -96,22 +96,32 @@ def contains_japanese(text):
 @st.cache_data
 def get_stock_name_fallback(code):
     try:
-        if not str(code).isdigit(): return f"コード({code})"
+        code_str = str(code).strip()
+        if not code_str.isdigit(): return f"コード({code_str})"
 
-        url = f"https://finance.yahoo.co.jp/quote/{code}.T"
-        res = requests.get(url)
-        # ▼▼▼ 修正箇所：文字コードをUTF-8に強制指定して文字化けを防ぐ ▼▼▼
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        url = f"https://finance.yahoo.co.jp/quote/{code_str}.T"
+        res = requests.get(url, headers=headers, timeout=5)
         res.encoding = "utf-8" 
         
         soup = BeautifulSoup(res.text, 'html.parser')
-        title = soup.find('title').text
-        company_name = title.split('【')[0]
-        # Yahoo! JAPANなどが含まれる場合があるので、整形
-        company_name = company_name.replace(" - Yahoo!ファイナンス", "").strip()
+        title_tag = soup.find('title')
+        if title_tag and title_tag.text:
+            title = title_tag.text
+            company_name = title.split('【')[0].replace(" - Yahoo!ファイナンス", "").strip()
+            if company_name:
+                return company_name
+
+        tkr = yf.Ticker(f"{code_str}.T")
+        info = tkr.info
+        name = info.get('shortName') or info.get('longName')
+        if name:
+            return name
+
+    except Exception:
+        pass
         
-        return company_name
-    except:
-        return f"コード({code})"
+    return f"コード({code})"
 
 def load_csv_from_github(filename):
     repo = get_github_repo()
@@ -410,9 +420,10 @@ def main():
             if v['qty'] <= 0: continue
             
             name = v.get('name')
-            # 日本語名が入っていない場合、取得しに行くロジック
-            if not name or "コード(" in name or not contains_japanese(name):
+            if not name or str(name).strip() == "" or "コード(" in str(name):
                 name = get_stock_name_fallback(code)
+                if not name or str(name).strip() == "":
+                    name = f"コード({code})"
                 st.session_state.portfolio[code]['name'] = name # メモリ上更新
             
             port_options[code] = f"{name} ({code})"
@@ -486,7 +497,7 @@ def main():
                         st.markdown(f"#### {row['銘柄名']} ({row['証券コード']})")
                         mc1, mc2 = st.columns(2)
                         with mc1:
-                            st.write(f"**現在値:** {row['現在値']}")
+                            st.write(f"現在値: {row['現在値']}")
                             
                             diff_val = row['前日比']
                             if "+" in diff_val: color = "red"
@@ -496,7 +507,7 @@ def main():
 
                             st.caption(f"平均: {row['平均取得単価']}円")
                         with mc2:
-                            st.write(f"**含み損益:** {row['含み損益']}")
+                            st.write(f"含み損益: {row['含み損益']}")
                             st.caption(f"騰落率: {row['騰落率']}")
                         
                         st.text(f"保有: {row['保有株数']}株 | 元本: {row['保有元本']}")
