@@ -100,23 +100,42 @@ def get_stock_name_fallback(code):
         if not code_str.isdigit(): return f"コード({code_str})"
 
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-        url = f"https://finance.yahoo.co.jp/quote/{code_str}.T"
-        res = requests.get(url, headers=headers, timeout=5)
-        res.encoding = "utf-8" 
         
-        soup = BeautifulSoup(res.text, 'html.parser')
-        title_tag = soup.find('title')
-        if title_tag and title_tag.text:
-            title = title_tag.text
-            company_name = title.split('【')[0].replace(" - Yahoo!ファイナンス", "").strip()
-            if company_name:
-                return company_name
+        # 1. みんかぶ (正式な日本語名が取りやすい)
+        try:
+            url = f"https://minkabu.jp/stock/{code_str}"
+            res = requests.get(url, headers=headers, timeout=5)
+            res.encoding = "utf-8"
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                title_tag = soup.find('title')
+                if title_tag and title_tag.text:
+                    name = title_tag.text.split(' (')[0].strip()
+                    if name and "minkabu" not in name.lower() and "見つかりません" not in name:
+                        return name
+        except: pass
 
-        tkr = yf.Ticker(f"{code_str}.T")
-        info = tkr.info
-        name = info.get('shortName') or info.get('longName')
-        if name:
-            return name
+        # 2. Kabutan (バックアップ)
+        try:
+            url = f"https://kabutan.jp/stock/?code={code_str}"
+            res = requests.get(url, headers=headers, timeout=5)
+            res.encoding = "utf-8"
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                title_tag = soup.find('title')
+                if title_tag and title_tag.text:
+                    name = title_tag.text.split('【')[0].strip()
+                    if name and "kabutan" not in name.lower() and "探しておられる" not in name:
+                        return name
+        except: pass
+
+        # 3. yfinance (最終手段)
+        try:
+            tkr = yf.Ticker(f"{code_str}.T")
+            info = tkr.info
+            name = info.get('longName') or info.get('shortName')
+            if name: return name
+        except: pass
 
     except Exception:
         pass
@@ -175,6 +194,12 @@ def save_to_github_fast(filename, df):
             repo.create_file(filename, f"Create {filename}", content)
         except: pass
 
+def is_clean_name(n):
+    ns = str(n)
+    if not ns or "コード(" in ns or "Yahoo!" in ns or "表示できません" in ns:
+        return False
+    return True
+
 def recalculate_all(logs):
     sorted_logs = sorted(logs, key=lambda x: x['日付'])
     portfolio = {}
@@ -192,13 +217,13 @@ def recalculate_all(logs):
         qty = int(log['数量'])
         price = float(log['約定単価'])
         
-        log_name = log.get('銘柄名')
-        current_port_name = portfolio.get(code, {}).get('name')
+        log_name = log.get('銘柄名', "")
+        current_port_name = portfolio.get(code, {}).get('name', "")
         
         final_name = f"コード({code})"
-        if current_port_name and "コード(" not in str(current_port_name):
+        if is_clean_name(current_port_name):
             final_name = current_port_name
-        elif log_name and "コード(" not in str(log_name):
+        elif is_clean_name(log_name):
             final_name = log_name
 
         if trade_type in ["買い", "新規買付", "買い増し"]:
@@ -415,16 +440,26 @@ def main():
         rows = []
         port_options = {}
 
-        # 3. データ整形
+        # 3. データ整形とエラー名の自動修復
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
             
-            name = v.get('name')
-            if not name or str(name).strip() == "" or "コード(" in str(name):
-                name = get_stock_name_fallback(code)
-                if not name or str(name).strip() == "":
-                    name = f"コード({code})"
-                st.session_state.portfolio[code]['name'] = name # メモリ上更新
+            name = v.get('name', "")
+            
+            # エラー文字や英語表記のみの場合は再取得して修復
+            needs_update = False
+            if not name or "コード(" in str(name):
+                needs_update = True
+            elif "Yahoo!" in str(name) or "表示できません" in str(name):
+                needs_update = True
+            elif not contains_japanese(name):
+                needs_update = True
+
+            if needs_update:
+                new_name = get_stock_name_fallback(code)
+                if new_name and "コード(" not in new_name:
+                    name = new_name
+                    st.session_state.portfolio[code]['name'] = name # メモリ上更新
             
             port_options[code] = f"{name} ({code})"
 
