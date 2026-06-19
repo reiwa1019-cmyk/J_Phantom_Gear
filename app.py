@@ -223,31 +223,35 @@ def load_csv_from_github(filename):
         return [] if filename == 'trade_log.csv' or filename == 'past_data.csv' else {}
 
 def save_to_github_fast(filename, df):
-    if not IS_ADMIN: return
+    # 保存の成否を True/False で返す(呼び出し側で『両方成功した時だけ反映完了』を判定するため)。
+    if not IS_ADMIN: return False
     repo = get_github_repo()
-    if not repo: return
+    if not repo: return False
 
     try:
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
         content = csv_buffer.getvalue()
         sha = st.session_state.get(f'{filename}_sha')
-        
+
         if sha:
             try:
                 commit = repo.update_file(filename, f"Update {filename}", content, sha)
                 st.session_state[f'{filename}_sha'] = commit['content'].sha
-                return
+                return True
             except: pass
-            
+
         file = repo.get_contents(filename)
         commit = repo.update_file(filename, f"Update {filename}", content, file.sha)
         st.session_state[f'{filename}_sha'] = commit['content'].sha
+        return True
 
     except Exception as e:
         try:
             repo.create_file(filename, f"Create {filename}", content)
-        except: pass
+            return True
+        except:
+            return False
 
 def is_clean_name(n):
     ns = str(n)
@@ -453,15 +457,22 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
         
-        save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
-        save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
-        
+        ok1 = save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
+        ok2 = save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
+
         s.portfolio = new_port
         s.trade_log = new_logs
-        st.toast("✅ 反映完了")
+        if ok1 and ok2:
+            st.toast("✅ 反映完了")
+        else:
+            st.toast("⚠️ 保存に失敗しました。通信を確認し、ページを再読込してやり直してください(まだ保存されていません)", icon="⚠️")
 
 def handle_buy():
     s = st.session_state
+    _pos = s.get('portfolio', {}).get(str(s.buy_code).strip())
+    # 恩株(コスト0)保有中の銘柄に買い増すと、平均化で恩株ボーナス対象から外れる旨を警告(権利の静かな消失防止)。
+    if _pos and _pos.get('qty', 0) > 0 and _pos.get('avg_price', 1) == 0:
+        st.toast("⚠️ この銘柄は恩株(タダ株)保有中です。買い増すと恩株ボーナスの対象から外れます。先に『受領（消す）』をご検討ください", icon="⚠️")
     execute_transaction("買い", s.buy_date, s.buy_code, s.buy_qty, s.buy_price, False)
     s.buy_code = ""
     s.buy_price = 0.0
@@ -525,11 +536,14 @@ def handle_onkabu_settle(code, name, qty, current_price):
                    '数量': int(qty), '約定単価': float(current_price), '平均単価': 0, '確定損益': 0, 'ボーナス': True}
         s.trade_log.append(new_log)
         new_port, new_logs = recalculate_all(s.trade_log)
-        save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
-        save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
+        ok1 = save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
+        ok2 = save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
         s.portfolio = new_port
         s.trade_log = new_logs
-        st.toast("✅ 恩株ボーナスを受領済みにしました")
+        if ok1 and ok2:
+            st.toast("✅ 恩株ボーナスを受領済みにしました")
+        else:
+            st.toast("⚠️ 保存に失敗しました。通信を確認し再読込してやり直してください(まだ保存されていません)", icon="⚠️")
     st.rerun()
 
 def handle_save_changes(edited_df):
@@ -542,13 +556,16 @@ def handle_save_changes(edited_df):
 
         logs = valid_rows.to_dict(orient='records')
         new_port, new_logs = recalculate_all(logs)
-        
-        save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
-        save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
-        
+
+        ok1 = save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
+        ok2 = save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
+
         st.session_state.portfolio = new_port
         st.session_state.trade_log = new_logs
-        st.success("完了！")
+        if ok1 and ok2:
+            st.success("完了！")
+        else:
+            st.error("⚠️ 保存に失敗しました。通信を確認し、ページを再読込してやり直してください（まだ保存されていません）")
         time.sleep(1)
         st.rerun()
 
@@ -559,6 +576,10 @@ def main():
         with st.spinner('☁️ 起動中...'):
             st.session_state.portfolio = load_csv_from_github('portfolio.csv')
             st.session_state.trade_log = load_csv_from_github('trade_log.csv')
+            # 履歴(trade_log)を唯一の正本とし、起動時に建玉を再計算で作り直す。
+            # → 起動時の数字が常に履歴と一致(保存値のズレ・過大計上などを自動是正)。trade_log読込失敗時は保存値を維持。
+            if st.session_state.trade_log:
+                st.session_state.portfolio, st.session_state.trade_log = recalculate_all(st.session_state.trade_log)
 
     st.title("J_Phantom_Gear ⚙️")
     st.caption("運用レポート & 成功報酬管理")
@@ -659,11 +680,20 @@ def main():
     
     use_mobile_view = st.toggle("📱 スマホ用表示モード", value=True)
     
-    total_onkabu_value = 0 
-    
+    total_onkabu_value = 0
+    any_price_pending = False   # 株価取得失敗の有無(取得失敗時に金額が不正確な旨を警告するため)
+
     onkabu_holdings = []   # 保有中の恩株(コスト0)銘柄: 恩株ボーナス欄の一覧用
-    # 受領済み(恩株精算)の銘柄コード集合
-    settled_codes = {str(r.get('証券コード', '')).strip() for r in (st.session_state.trade_log or []) if r.get('区分') == '恩株精算'}
+    # 受領済み表示用: 恩株精算があり、かつ その後に同じ銘柄の『買い』が無いコードだけ
+    # (受領→全売却→買い直した株を誤って『受領済み』表示しないため)
+    settled_codes = set()
+    if st.session_state.trade_log:
+        _last_settle, _last_buy = {}, {}
+        for _i, _r in enumerate(st.session_state.trade_log):
+            _c = str(_r.get('証券コード', '')).strip(); _k = _r.get('区分')
+            if _k == '恩株精算': _last_settle[_c] = _i
+            elif _k in ('買い', '新規買付', '買い増し'): _last_buy[_c] = _i
+        settled_codes = {_c for _c, _i in _last_settle.items() if _i > _last_buy.get(_c, -1)}
 
     # ▼▼▼ 合計計算用の変数 ▼▼▼
     total_portfolio_cost = 0
@@ -714,18 +744,22 @@ def main():
             
             cost = v['qty'] * v['avg_price']
             is_data_error = (current_price == 0)
+            if is_data_error: any_price_pending = True
 
             if is_short:
                 # 空売り建玉: 恩株判定は通さない(空売りに恩株の概念は無い)。
                 status_text = "🟠 空売り建玉（値下がりで利益）"
             elif v['avg_price'] == 0:
                 status_text = "👑 恩株 (コスト0円)"
-                cv = (current_price * v['qty']) if not is_data_error else 0
-                if not is_data_error:
+                # 株価が異常値(元の取得単価から極端に乖離)なら、ボーナス集計から外し受領も止める(誤受領防止)。
+                _oa = v.get('original_avg', 0) or 0
+                suspect = (not is_data_error) and _oa > 0 and (current_price > _oa * 10 or current_price < _oa * 0.1)
+                cv = (current_price * v['qty']) if (not is_data_error and not suspect) else 0
+                if not is_data_error and not suspect:
                     total_onkabu_value += cv
                 # 恩株ボーナス欄の一覧用に保持(銘柄ごとに受領ボタンを出す)
-                onkabu_holdings.append({'code': code, 'name': name, 'qty': v['qty'],
-                                        'price': current_price, 'value': cv, 'pending': is_data_error})
+                onkabu_holdings.append({'code': code, 'name': name, 'qty': v['qty'], 'price': current_price,
+                                        'value': cv, 'pending': is_data_error, 'suspect': suspect})
             elif code in settled_codes:
                 # 恩株ボーナス受領済み(コスト更新後の保有株)
                 status_text = "✅ 恩株ボーナス受領済み"
@@ -757,13 +791,14 @@ def main():
                     total_portfolio_cost += cost
                     total_portfolio_pl += unrealized_pl
                 
-                # 前日比（エラー回避修正済み）
+                # 前日比（空売りは保有者視点で符号反転し、含み損益・騰落率とサインを揃える）
                 try:
-                    if math.isnan(diff) or math.isinf(diff):
+                    d = (-diff if is_short else diff)
+                    if math.isnan(d) or math.isinf(d):
                         change_str = "---"
                     else:
-                        mark_diff = "+" if diff > 0 else ""
-                        change_str = f"{mark_diff}{int(diff)}"
+                        mark_diff = "+" if d > 0 else ""
+                        change_str = f"{mark_diff}{int(d)}"
                 except:
                     change_str = "---"
                 
@@ -823,7 +858,7 @@ def main():
             with sum_c1:
                 st.metric("💰 総投資額 (保有元本)", f"¥{int(total_portfolio_cost):,}", help="恩株（コスト0円）は除外しています")
             with sum_c2:
-                st.metric("📊 含み損益合計 (運用中)", f"¥{int(total_portfolio_pl):,}", delta=f"{int(total_portfolio_pl):,}", help="恩株の含み益はここに含まれず、下の『実質マイナス』等の計算で考慮されます")
+                st.metric("📊 含み損益合計 (運用中)", f"¥{int(total_portfolio_pl):,}", help="恩株の含み益はここに含まれず、下の『実質マイナス』等の計算で考慮されます。日本式に合わせ色付きの増減表示は外しています(金額の符号で判断してください)")
             st.markdown("---")
             
             with st.expander("📈 恩株シミュレーター（将来予測）", expanded=False):
@@ -861,7 +896,9 @@ def main():
 
     # ▼ 💰 成功報酬管理
     st.subheader("💰 成功報酬管理")
-    
+    if any_price_pending:
+        st.warning("⚠️ 一部銘柄の株価を取得できていません。含み損益・恩株ボーナスの金額が不正確な可能性があります（時間をおいてページを再読込してください）。受領は株価が取れた銘柄のみ可能です。")
+
     df_calc = pd.DataFrame(st.session_state.trade_log) if st.session_state.trade_log else pd.DataFrame(columns=['確定損益', 'ボーナス'])
     if 'ボーナス' not in df_calc.columns: df_calc['ボーナス'] = False
     
@@ -954,10 +991,12 @@ def main():
             with cc1:
                 if h.get('pending'):
                     st.markdown(f"👑 **{h['name']}** ({h['code']}) ｜ {h['qty']}株 ｜ ⏳ 株価取得中…（取得後に受領できます）")
+                elif h.get('suspect'):
+                    st.markdown(f"👑 **{h['name']}** ({h['code']}) ｜ {h['qty']}株 ｜ ⚠️ 株価が異常値の可能性（現在値 {int(h['price']):,}円）。手でご確認ください")
                 else:
                     st.markdown(f"👑 **{h['name']}** ({h['code']}) ｜ {h['qty']}株 ｜ 現在価値 ¥{int(cv):,} ｜ ボーナス15% ¥{int(per_bonus):,}")
             with cc2:
-                if IS_ADMIN and not h.get('pending'):
+                if IS_ADMIN and not h.get('pending') and not h.get('suspect'):
                     if st.button("💸 受領（消す）", key=f"settle_{h['code']}"):
                         handle_onkabu_settle(h['code'], h['name'], h['qty'], h['price'])
 
