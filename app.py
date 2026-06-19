@@ -313,12 +313,20 @@ def recalculate_all(logs):
                 if is_bonus:
                     total_holding_cost = cur['qty'] * cur['avg_price']
                     sell_amount = qty * price
-                    profit = sell_amount - total_holding_cost
-                    new_avg = 0.0
-                    portfolio[code]['qty'] = max(0, cur['qty'] - qty)
-                    portfolio[code]['avg_price'] = new_avg
-                    portfolio[code]['realized_pl'] += profit
-                    log.update({'平均単価': 0, '確定損益': int(profit), '銘柄名': cur['name']})
+                    if sell_amount >= total_holding_cost:
+                        # 元本を回収できた → 従来どおり恩株化(残り株のコストを0に)
+                        profit = sell_amount - total_holding_cost
+                        portfolio[code]['qty'] = max(0, cur['qty'] - qty)
+                        portfolio[code]['avg_price'] = 0.0
+                        portfolio[code]['realized_pl'] += profit
+                        log.update({'平均単価': 0, '確定損益': int(profit), '銘柄名': cur['name']})
+                    else:
+                        # 元本を回収しきれていない部分恩株化 → 普通の売りとして正しく計算。
+                        # 確定損益は売った株の純益(price-avg)*qty。残り株はコストを残す(タダにしない)。
+                        profit = (price - cur['avg_price']) * qty
+                        portfolio[code]['qty'] = max(0, cur['qty'] - qty)
+                        portfolio[code]['realized_pl'] += profit
+                        log.update({'平均単価': round(cur['avg_price'], 2), '確定損益': int(profit), '銘柄名': cur['name']})
                 else:
                     profit = (price - cur['avg_price']) * qty
                     portfolio[code]['qty'] = max(0, cur['qty'] - qty)
@@ -334,7 +342,17 @@ def execute_transaction(tx_type, date_val, code_val, qty_val, price_val, is_bonu
     if not IS_ADMIN: return 
 
     s = st.session_state
-    
+
+    # 二重登録ガード: 直前(5秒以内)とまったく同じ取引が来たら弾く。
+    # スマホの二度押し/保存中(GitHub書込で遅い)の再発火による二重計上を防ぐ。
+    _sig = (tx_type, str(code_val).strip(), qty_val, price_val, bool(is_bonus))
+    _now = time.time()
+    _last = s.get('_last_tx')
+    if _last and _last[0] == _sig and (_now - _last[1]) < 5:
+        st.toast("⚠️ 直前と同じ取引です。二重登録を防ぐためスキップしました", icon="⚠️")
+        return
+    s['_last_tx'] = (_sig, _now)
+
     with st.spinner('🚀 処理中...'):
         if tx_type == "データ調整":
             new_log = {
@@ -376,6 +394,11 @@ def handle_buy():
 
 def handle_sell():
     s = st.session_state
+    # 恩株化チェック時、売却額が保有元本に届かない(=元本未回収)なら通常売りとして計上される旨を案内。
+    if s.sell_is_bonus:
+        pos = s.get('portfolio', {}).get(str(s.sell_code).strip())
+        if pos and (s.sell_qty * s.sell_price) < (pos.get('qty', 0) * pos.get('avg_price', 0)):
+            st.toast("ℹ️ 元本未回収のため、今回は通常の売り(正しい損益)として計上します", icon="ℹ️")
     execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price, s.sell_is_bonus)
     s.sell_code = ""
     s.sell_price = 0.0
