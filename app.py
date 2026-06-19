@@ -200,8 +200,13 @@ def load_csv_from_github(filename):
         
         if filename == 'portfolio.csv':
             df['Code'] = df['Code'].astype(str)
-            # 後方互換: 旧CSV(position_side列なし)は全て『買い建て(long)』として復元。
+            # 後方互換: 欠損列を既定値で補完(旧バージョンのCSVでも起動時クラッシュしないように)。
             # 起動時はここで読んだ値を recalculate_all を経ずに直接表示するため、この補完が必須。
+            for col, default in [('name', ''), ('qty', 0), ('avg_price', 0.0), ('realized_pl', 0), ('original_avg', 0.0)]:
+                if col not in df.columns:
+                    df[col] = default
+                else:
+                    df[col] = df[col].fillna(default)
             if 'position_side' not in df.columns:
                 df['position_side'] = 'long'
             else:
@@ -251,7 +256,14 @@ def is_clean_name(n):
     return True
 
 def recalculate_all(logs):
-    sorted_logs = sorted(logs, key=lambda x: x['日付'])
+    # 履歴編集で空行/空欄が残っても落ちないよう、不正行を除外してから並べ替える
+    def _valid(r):
+        d = r.get('日付'); k = r.get('区分')
+        if d is None or k is None: return False
+        if str(d).strip() in ('', 'NaT', 'nan', 'None'): return False
+        if str(k).strip() in ('', 'nan', 'None'): return False
+        return True
+    sorted_logs = sorted([l for l in logs if _valid(l)], key=lambda x: x['日付'])
     portfolio = {}
     processed_logs = []
 
@@ -275,9 +287,15 @@ def recalculate_all(logs):
             processed_logs.append(log)
             continue
 
-        qty = int(log['数量'])
-        price = float(log['約定単価'])
-        
+        try:
+            qty = int(float(log['数量']))
+            price = float(log['約定単価'])
+        except (TypeError, ValueError):
+            # 数量/単価が空・不正な行はスキップ(履歴編集の空行対策)。確定損益0で素通り。
+            log.update({'確定損益': 0})
+            processed_logs.append(log)
+            continue
+
         log_name = log.get('銘柄名', "")
         current_port_name = portfolio.get(code, {}).get('name', "")
         
@@ -365,26 +383,27 @@ def recalculate_all(logs):
                 continue
             if code in portfolio:
                 cur = portfolio[code]
+                fill = min(qty, cur['qty'])   # 保有数を超える売りは実際に売れる数までに丸める(確定益の過大計上=過大請求を防ぐ)
                 if is_bonus:
                     total_holding_cost = cur['qty'] * cur['avg_price']
-                    sell_amount = qty * price
+                    sell_amount = fill * price
                     if sell_amount >= total_holding_cost:
                         # 元本を回収できた → 従来どおり恩株化(残り株のコストを0に)
                         profit = sell_amount - total_holding_cost
-                        portfolio[code]['qty'] = max(0, cur['qty'] - qty)
+                        portfolio[code]['qty'] = cur['qty'] - fill
                         portfolio[code]['avg_price'] = 0.0
                         portfolio[code]['realized_pl'] += profit
                         log.update({'平均単価': 0, '確定損益': int(profit), '銘柄名': cur['name']})
                     else:
                         # 元本を回収しきれていない部分恩株化 → 普通の売りとして正しく計算。
-                        # 確定損益は売った株の純益(price-avg)*qty。残り株はコストを残す(タダにしない)。
-                        profit = (price - cur['avg_price']) * qty
-                        portfolio[code]['qty'] = max(0, cur['qty'] - qty)
+                        # 確定損益は売った株の純益(price-avg)*fill。残り株はコストを残す(タダにしない)。
+                        profit = (price - cur['avg_price']) * fill
+                        portfolio[code]['qty'] = cur['qty'] - fill
                         portfolio[code]['realized_pl'] += profit
                         log.update({'平均単価': round(cur['avg_price'], 2), '確定損益': int(profit), '銘柄名': cur['name']})
                 else:
-                    profit = (price - cur['avg_price']) * qty
-                    portfolio[code]['qty'] = max(0, cur['qty'] - qty)
+                    profit = (price - cur['avg_price']) * fill
+                    portfolio[code]['qty'] = cur['qty'] - fill
                     portfolio[code]['realized_pl'] += profit
                     log.update({'平均単価': round(cur['avg_price'], 2), '確定損益': int(profit), '銘柄名': cur['name']})
         
@@ -449,10 +468,13 @@ def handle_buy():
 
 def handle_sell():
     s = st.session_state
+    _pos = s.get('portfolio', {}).get(str(s.sell_code).strip())
+    # 保有数を超える売りは保有数までで計上する旨を案内(過大計上は計算側で防止済み)。
+    if _pos and _pos.get('position_side', 'long') == 'long' and s.sell_qty > _pos.get('qty', 0):
+        st.toast(f"⚠️ 保有 {int(_pos.get('qty', 0))} 株を超える売りです。実際に売れる {int(_pos.get('qty', 0))} 株分で計上します", icon="⚠️")
     # 恩株化チェック時、売却額が保有元本に届かない(=元本未回収)なら通常売りとして計上される旨を案内。
     if s.sell_is_bonus:
-        pos = s.get('portfolio', {}).get(str(s.sell_code).strip())
-        if pos and (s.sell_qty * s.sell_price) < (pos.get('qty', 0) * pos.get('avg_price', 0)):
+        if _pos and (s.sell_qty * s.sell_price) < (_pos.get('qty', 0) * _pos.get('avg_price', 0)):
             st.toast("ℹ️ 元本未回収のため、今回は通常の売り(正しい損益)として計上します", icon="ℹ️")
     execute_transaction("売り", s.sell_date, s.sell_code, s.sell_qty, s.sell_price, s.sell_is_bonus)
     s.sell_code = ""
