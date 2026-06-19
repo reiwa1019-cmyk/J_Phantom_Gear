@@ -8,39 +8,83 @@ import time
 import math
 import requests
 from bs4 import BeautifulSoup
-import re 
+import re
+import hmac, hashlib
 
 # --- 0. 設定・セキュリティ ---
 st.set_page_config(page_title="J_Phantom_Gear", layout="wide")
+
+def _auth_secret():
+    # トークン署名用のサーバ側シークレット(URLには出ない)。
+    try:
+        g = st.secrets["general"]
+        return g.get("APP_PASSWORD", "admin123") + "|" + g.get("VIEWER_PASSWORD", "guest123") + "|jpg-auth"
+    except Exception:
+        return "jpg-auth-default"
+
+def _make_token(role):
+    exp = int(time.time()) + 24 * 3600  # 24時間有効
+    payload = f"{role}.{exp}"
+    sig = hmac.new(_auth_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:20]
+    return f"{payload}.{sig}"
+
+def _check_token(tok):
+    try:
+        role, exp, sig = str(tok).split(".")
+        payload = f"{role}.{exp}"
+        good = hmac.new(_auth_secret().encode(), payload.encode(), hashlib.sha256).hexdigest()[:20]
+        if hmac.compare_digest(sig, good) and int(exp) > time.time() and role in ("admin", "viewer"):
+            return role
+    except Exception:
+        pass
+    return None
 
 def check_password():
     if 'user_role' not in st.session_state:
         st.session_state['user_role'] = None
 
+    # 自動ログイン: 有効なURLトークンがあれば24時間ログイン維持(更新してもログイン画面に戻らない)
+    if not st.session_state['user_role']:
+        try:
+            tok = st.query_params.get('t')
+        except Exception:
+            tok = None
+        if tok:
+            r = _check_token(tok)
+            if r:
+                st.session_state['user_role'] = r
+
     if st.session_state['user_role']:
         role_label = "管理者 (Admin)" if st.session_state['user_role'] == "admin" else "閲覧者 (Guest)"
-        st.sidebar.caption(f"ログイン中: {role_label}")
+        st.sidebar.caption(f"ログイン中: {role_label}（24時間維持）")
         if st.sidebar.button("ログアウト"):
             st.session_state['user_role'] = None
+            try: st.query_params.clear()
+            except Exception: pass
             st.rerun()
         return True
 
     st.markdown("### 🔒 Login")
     password = st.text_input("パスワードを入力してください", type="password")
-    
+
     if st.button("ログイン"):
         admin_pass = st.secrets["general"].get("APP_PASSWORD", "admin123")
         viewer_pass = st.secrets["general"].get("VIEWER_PASSWORD", "guest123")
 
+        role = None
         if password == admin_pass:
-            st.session_state['user_role'] = "admin"
-            st.rerun()
+            role = "admin"
         elif password == viewer_pass:
-            st.session_state['user_role'] = "viewer"
+            role = "viewer"
+
+        if role:
+            st.session_state['user_role'] = role
+            try: st.query_params['t'] = _make_token(role)   # 24時間維持トークンをURLに保存
+            except Exception: pass
             st.rerun()
         else:
             st.error("パスワードが間違っています")
-    
+
     return False
 
 if not check_password(): st.stop()
@@ -217,6 +261,17 @@ def recalculate_all(logs):
         is_bonus = log.get('ボーナス', False)
         
         if trade_type in ["データ調整", "報酬精算"]:
+            processed_logs.append(log)
+            continue
+
+        if trade_type == "恩株精算":
+            # 恩株ボーナス受領: その恩株のコストを「受領時の株価」に更新(コスト更新方式)。
+            # 株は保有に残り恩株一覧から外れる。確定損益0(損益は発生しない)。以後の値上がり分だけ通常報酬対象。
+            settle_price = float(log['約定単価'])
+            if code in portfolio and portfolio[code].get('avg_price', 0) == 0 and portfolio[code].get('qty', 0) > 0:
+                portfolio[code]['avg_price'] = settle_price
+                portfolio[code]['original_avg'] = settle_price
+            log.update({'確定損益': 0})
             processed_logs.append(log)
             continue
 
@@ -437,6 +492,24 @@ def handle_payment_reset(profit_amount, is_bonus_payment):
     reset_amount = -1 * profit_amount
     execute_transaction("報酬精算", date.today(), "PAYMENT", 0, reset_amount, is_bonus_payment)
 
+def handle_onkabu_settle(code, name, qty, current_price):
+    # 恩株ボーナス受領(消す): 恩株精算行を追加し、その恩株のコストを受領時株価に更新する。
+    # 株は保有に残り、恩株一覧から外れる。以後の値上がり分だけ通常報酬の対象になる(二重取りなし)。
+    if not IS_ADMIN: return
+    s = st.session_state
+    code = str(code).strip()
+    with st.spinner('💾 受領処理中...'):
+        new_log = {'日付': date.today(), '区分': '恩株精算', '証券コード': code, '銘柄名': name,
+                   '数量': int(qty), '約定単価': float(current_price), '平均単価': 0, '確定損益': 0, 'ボーナス': True}
+        s.trade_log.append(new_log)
+        new_port, new_logs = recalculate_all(s.trade_log)
+        save_to_github_fast('portfolio.csv', pd.DataFrame.from_dict(new_port, orient='index').reset_index().rename(columns={'index':'Code'}))
+        save_to_github_fast('trade_log.csv', pd.DataFrame(new_logs))
+        s.portfolio = new_port
+        s.trade_log = new_logs
+        st.toast("✅ 恩株ボーナスを受領済みにしました")
+    st.rerun()
+
 def handle_save_changes(edited_df):
     if not IS_ADMIN: return
 
@@ -566,6 +639,10 @@ def main():
     
     total_onkabu_value = 0 
     
+    onkabu_holdings = []   # 保有中の恩株(コスト0)銘柄: 恩株ボーナス欄の一覧用
+    # 受領済み(恩株精算)の銘柄コード集合
+    settled_codes = {str(r.get('証券コード', '')).strip() for r in (st.session_state.trade_log or []) if r.get('区分') == '恩株精算'}
+
     # ▼▼▼ 合計計算用の変数 ▼▼▼
     total_portfolio_cost = 0
     total_portfolio_pl = 0
@@ -621,8 +698,15 @@ def main():
                 status_text = "🟠 空売り建玉（値下がりで利益）"
             elif v['avg_price'] == 0:
                 status_text = "👑 恩株 (コスト0円)"
+                cv = (current_price * v['qty']) if not is_data_error else 0
                 if not is_data_error:
-                    total_onkabu_value += (current_price * v['qty'])
+                    total_onkabu_value += cv
+                # 恩株ボーナス欄の一覧用に保持(銘柄ごとに受領ボタンを出す)
+                onkabu_holdings.append({'code': code, 'name': name, 'qty': v['qty'],
+                                        'price': current_price, 'value': cv, 'pending': is_data_error})
+            elif code in settled_codes:
+                # 恩株ボーナス受領済み(コスト更新後の保有株)
+                status_text = "✅ 恩株ボーナス受領済み"
             else:
                 is_onkabu = v['realized_pl'] >= cost
                 if is_onkabu: status_text = "🏆完全恩株達成！"
@@ -762,22 +846,24 @@ def main():
     adjust_logs = df_calc[df_calc['証券コード'] == 'ADJUST']
     adjust_total = adjust_logs['確定損益'].sum() if not adjust_logs.empty else 0
 
-    standard_pl = df_calc[df_calc['ボーナス'] == False]['確定損益'].sum()
-    bonus_base_profit = df_calc[df_calc['ボーナス'] == True]['確定損益'].sum()
-    effective_aggregate_pl = standard_pl + bonus_base_profit
+    # 通常成功報酬の母数 = 全確定損益の合計(恩株精算=0 のみ除外)。
+    # データ調整(過去損益の起点)・報酬精算(リセット)は従来どおり含む=既存挙動を維持。
+    # 恩株化で売った確定益もここに1回だけ入る((A))。恩株ボーナスは別枠(保有恩株の現在価値)なので二重取りは解消。
+    if '区分' not in df_calc.columns: df_calc['区分'] = ''
+    normal_pl = df_calc[df_calc['区分'] != '恩株精算']['確定損益'].sum()
 
-    real_status = effective_aggregate_pl + total_onkabu_value
-    
+    real_status = normal_pl + total_onkabu_value
+
     col_r1, col_r2, col_r3 = st.columns([1, 1, 1])
-    
+
     with col_r1:
-        if effective_aggregate_pl < 0:
-            loss = abs(effective_aggregate_pl)
+        if normal_pl < 0:
+            loss = abs(normal_pl)
             st.markdown(f"""
             <div style="background-color: #f8d7da; padding: 20px; border-radius: 10px; border: 2px solid #f5c6cb;">
                 <h3 style="color: #721c24; margin:0;">⚠️ マイナス合算</h3>
                 <h1 style="color: #721c24; margin:0;">¥ {int(loss):,}</h1>
-                <p style="margin:0; font-size:0.8em; color:#721c24;">(通常: ¥{int(standard_pl):,} + 恩株益: ¥{int(bonus_base_profit):,})</p>
+                <p style="margin:0; font-size:0.8em; color:#721c24;">(確定損益の合計 ※恩株化で確定した利益も含む)</p>
             </div>""", unsafe_allow_html=True)
 
             if total_onkabu_value > 0:
@@ -793,12 +879,12 @@ def main():
             <div style="background-color: #d1ecf1; padding: 20px; border-radius: 10px; border: 2px solid #bee5eb;">
                 <h3 style="color: #0c5460; margin:0;">✨ 現在の損益状況</h3>
                 <h1 style="color: #0c5460; margin:0;">プラス運用中</h1>
-                <p style="margin:0;">(現在: +¥{int(effective_aggregate_pl):,})</p>
+                <p style="margin:0;">(現在: +¥{int(normal_pl):,})</p>
             </div>""", unsafe_allow_html=True)
 
     with col_r2:
-        if effective_aggregate_pl > 0:
-            reward = effective_aggregate_pl * 0.15
+        if normal_pl > 0:
+            reward = normal_pl * 0.15
             bg_color = "#d4edda" if reward > 10000 else "#f8f9fa"
             title_text = "🎉 成功報酬請求額 (15%)" if reward > 10000 else "成功報酬 (1万円以下)"
             st.markdown(f"""
@@ -806,10 +892,10 @@ def main():
                 <h3 style="color: #155724; margin:0;">{title_text}</h3>
                 <h1 style="color: #155724; margin:0;">¥ {int(reward):,}</h1>
             </div>""", unsafe_allow_html=True)
-            
+
             if reward > 10000 and IS_ADMIN:
                 if st.button("💸 通常報酬の支払い完了（リセット）", type="primary"):
-                    handle_payment_reset(effective_aggregate_pl, False)
+                    handle_payment_reset(normal_pl, False)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
@@ -819,36 +905,57 @@ def main():
             </div>""", unsafe_allow_html=True)
 
     with col_r3:
-        if bonus_base_profit > 0:
-            bonus_reward = bonus_base_profit * 0.15
+        bonus_target = total_onkabu_value          # 対象 = 保有恩株の現在価値
+        bonus_reward = bonus_target * 0.15
+        if bonus_target > 0:
             st.markdown(f"""
             <div style="background-color: #fff3cd; padding: 20px; border-radius: 10px; border: 2px solid #ffeeba;">
                 <h3 style="color: #856404; margin:0;">🏆 恩株ボーナス (15%)</h3>
                 <h1 style="color: #856404; margin:0;">¥ {int(bonus_reward):,}</h1>
-                <p style="margin:0;">(対象利益: ¥{int(bonus_base_profit):,})</p>
+                <p style="margin:0;">(対象: 保有恩株の現在価値 ¥{int(bonus_target):,})</p>
             </div>""", unsafe_allow_html=True)
-            
-            if IS_ADMIN:
-                if st.button("💸 ボーナス支払い完了（リセット）"):
-                    handle_payment_reset(bonus_base_profit, True)
         else:
             st.markdown(f"""
             <div style="background-color: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #ddd; opacity: 0.6;">
                 <h3 style="color: #6c757d; margin:0;">恩株ボーナス</h3>
                 <h1 style="color: #6c757d; margin:0;">¥ 0</h1>
+                <p style="margin:0; font-size:0.8em; color:#6c757d;">(対象になる保有恩株はありません)</p>
             </div>""", unsafe_allow_html=True)
+
+    # ▼ 恩株ボーナス: 銘柄ごとの一覧 + 受領(消す)ボタン（押すとその恩株のコストを今の株価に更新し決着）
+    if onkabu_holdings:
+        st.write("")
+        st.caption("【保有中の恩株（タダ株）】受領するとその株のボーナスが確定し一覧から外れます（株は保有に残り、以後の値上がり分だけ通常報酬の対象）。")
+        for h in onkabu_holdings:
+            cv = h['value']; per_bonus = cv * 0.15
+            cc1, cc2 = st.columns([3, 1])
+            with cc1:
+                if h.get('pending'):
+                    st.markdown(f"👑 **{h['name']}** ({h['code']}) ｜ {h['qty']}株 ｜ ⏳ 株価取得中…（取得後に受領できます）")
+                else:
+                    st.markdown(f"👑 **{h['name']}** ({h['code']}) ｜ {h['qty']}株 ｜ 現在価値 ¥{int(cv):,} ｜ ボーナス15% ¥{int(per_bonus):,}")
+            with cc2:
+                if IS_ADMIN and not h.get('pending'):
+                    if st.button("💸 受領（消す）", key=f"settle_{h['code']}"):
+                        handle_onkabu_settle(h['code'], h['name'], h['qty'], h['price'])
 
     st.write("")
 
     with st.expander("📜 過去の報酬支払履歴"):
         if st.session_state.trade_log:
-            pay_logs = [row for row in st.session_state.trade_log if row['証券コード'] == 'PAYMENT']
+            pay_logs = [row for row in st.session_state.trade_log if row.get('証券コード') == 'PAYMENT' or row.get('区分') == '恩株精算']
             if pay_logs:
                 pay_data = []
                 for p in pay_logs:
-                    profit_cleared = abs(p['確定損益'])
-                    paid_amount = profit_cleared * 0.15
-                    pay_type = "🏆 恩株ボーナス" if p.get('ボーナス') else "🎉 通常成功報酬"
+                    if p.get('区分') == '恩株精算':
+                        # 恩株ボーナス受領: 対象=数量×約定単価(受領時株価で固定), 支払=その15%
+                        profit_cleared = int(p.get('数量', 0)) * float(p.get('約定単価', 0))
+                        paid_amount = profit_cleared * 0.15
+                        pay_type = f"🏆 恩株ボーナス（{p.get('銘柄名','')}）"
+                    else:
+                        profit_cleared = abs(p['確定損益'])
+                        paid_amount = profit_cleared * 0.15
+                        pay_type = "🏆 恩株ボーナス" if p.get('ボーナス') else "🎉 通常成功報酬"
                     pay_data.append({
                         "支払日": p['日付'], "種類": pay_type,
                         "対象利益": f"¥ {int(profit_cleared):,}", "支払報酬額(15%)": f"¥ {int(paid_amount):,}"
@@ -932,7 +1039,7 @@ def main():
                     use_container_width=True, hide_index=True,
                     column_config={
                         "削除": st.column_config.CheckboxColumn("削除", width="small"),
-                        "区分": st.column_config.SelectboxColumn("区分", options=["買い","新規買付","買い増し","売り","売却","新規売り","買い戻し","データ調整","報酬精算"], help="取引の種類。空売りは『新規売り』で建てて『買い戻し』で決済します。誤記すると損益が0で計算されるため選択式にしています。"),
+                        "区分": st.column_config.SelectboxColumn("区分", options=["買い","新規買付","買い増し","売り","売却","新規売り","買い戻し","データ調整","報酬精算","恩株精算"], help="取引の種類。空売りは『新規売り』→『買い戻し』。『恩株精算』は恩株ボーナス受領ボタンが自動で作る行(手編集非推奨)。"),
                         "ボーナス": st.column_config.CheckboxColumn("🎉恩株", width="small", help="恩株化（元本全回収）の取引だった場合はチェック"),
                         "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                         "数量": st.column_config.NumberColumn("数量", min_value=0),
