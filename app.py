@@ -156,6 +156,12 @@ def load_csv_from_github(filename):
         
         if filename == 'portfolio.csv':
             df['Code'] = df['Code'].astype(str)
+            # 後方互換: 旧CSV(position_side列なし)は全て『買い建て(long)』として復元。
+            # 起動時はここで読んだ値を recalculate_all を経ずに直接表示するため、この補完が必須。
+            if 'position_side' not in df.columns:
+                df['position_side'] = 'long'
+            else:
+                df['position_side'] = df['position_side'].fillna('long')
             return df.set_index('Code').to_dict(orient='index')
         elif filename == 'past_data.csv':
             return df
@@ -227,9 +233,15 @@ def recalculate_all(logs):
             final_name = log_name
 
         if trade_type in ["買い", "新規買付", "買い増し"]:
+            # 反対玉ガード: 空売り建玉が残る銘柄への買いは両建て/ドテン誤区分として素通り(損益0)。
+            if code in portfolio and portfolio[code]['qty'] > 0 and portfolio[code].get('position_side', 'long') == 'short':
+                log.update({'確定損益': 0, '銘柄名': portfolio[code]['name']})
+                processed_logs.append(log)
+                continue
+
             if code not in portfolio:
-                portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0}
-            
+                portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0, 'position_side': 'long'}
+
             cur = portfolio[code]
             if contains_japanese(final_name) and not contains_japanese(cur['name']):
                  cur['name'] = final_name
@@ -248,10 +260,54 @@ def recalculate_all(logs):
             new_avg = total_cost / total_qty if total_qty > 0 else 0.0
             new_real_avg = total_real_cost / total_qty if total_qty > 0 else 0.0
             
-            portfolio[code].update({'qty': total_qty, 'avg_price': new_avg, 'original_avg': new_real_avg})
+            portfolio[code].update({'qty': total_qty, 'avg_price': new_avg, 'original_avg': new_real_avg, 'position_side': 'long'})
             log.update({'平均単価': round(new_avg, 2), '確定損益': 0, '銘柄名': cur['name']})
 
+        elif trade_type == "新規売り":
+            # 反対玉ガード: 買い建玉が残る銘柄への新規売りは両建て禁止として素通り(損益0)。
+            if code in portfolio and portfolio[code]['qty'] > 0 and portfolio[code].get('position_side', 'long') == 'long':
+                log.update({'確定損益': 0, '銘柄名': portfolio[code]['name']})
+                processed_logs.append(log)
+                continue
+
+            if code not in portfolio:
+                portfolio[code] = {'name': final_name, 'qty': 0, 'avg_price': 0.0, 'realized_pl': 0, 'original_avg': 0.0, 'position_side': 'short'}
+
+            cur = portfolio[code]
+            if contains_japanese(final_name) and not contains_japanese(cur['name']):
+                 cur['name'] = final_name
+            elif "コード(" in cur['name'] and "コード(" not in final_name:
+                cur['name'] = final_name
+
+            # 空売りの建値は「売建の加重平均」(常に正の値)。買い増しの鏡像。
+            total_proceeds = (cur['qty'] * cur['avg_price']) + (qty * price)
+            total_qty = cur['qty'] + qty
+            new_avg = total_proceeds / total_qty if total_qty > 0 else 0.0
+
+            portfolio[code].update({'qty': total_qty, 'avg_price': new_avg, 'original_avg': new_avg, 'position_side': 'short'})
+            log.update({'平均単価': round(new_avg, 2), '確定損益': 0, '銘柄名': cur['name']})
+
+        elif trade_type == "買い戻し":
+            # 空売り建玉があるときのみ決済。建玉なし/買い建ては逆クロスとして素通り(損益0)。
+            if code in portfolio and portfolio[code].get('position_side', 'long') == 'short' and portfolio[code]['qty'] > 0:
+                cur = portfolio[code]
+                fill = min(qty, cur['qty'])                  # 過剰買い戻しは建玉数までにクランプ
+                profit = (cur['avg_price'] - price) * fill   # 値下がりで利益
+                new_qty = cur['qty'] - fill
+                cur['realized_pl'] += profit
+                cur['qty'] = new_qty
+                if new_qty == 0:
+                    cur['position_side'] = 'long'            # 建玉ゼロ→中立(次は買いでも空売りでも開始可)に戻す
+                log.update({'平均単価': round(cur['avg_price'], 2), '確定損益': int(profit), '銘柄名': cur['name']})
+            else:
+                log.update({'確定損益': 0})
+
         elif trade_type in ["売り", "売却"]:
+            # 逆クロスガード: 空売り建玉への通常売りは素通り(空売りの決済は『買い戻し』)。
+            if code in portfolio and portfolio[code].get('position_side', 'long') == 'short' and portfolio[code]['qty'] > 0:
+                log.update({'確定損益': 0, '銘柄名': portfolio[code]['name']})
+                processed_logs.append(log)
+                continue
             if code in portfolio:
                 cur = portfolio[code]
                 if is_bonus:
@@ -324,6 +380,30 @@ def handle_sell():
     s.sell_code = ""
     s.sell_price = 0.0
     s.sell_is_bonus = False
+
+def handle_short_open():
+    s = st.session_state
+    code = str(s.short_code).strip()
+    pos = s.get('portfolio', {}).get(code)
+    # 両建てガード(UI側): 買い建て中の銘柄は空売り不可。
+    if pos and pos.get('qty', 0) > 0 and pos.get('position_side', 'long') == 'long':
+        st.toast("⚠️ この銘柄は買い建て中です。先に売却してから空売りしてください", icon="⚠️")
+        return
+    execute_transaction("新規売り", s.short_date, code, s.short_qty, s.short_price, False)
+    s.short_code = ""
+    s.short_price = 0.0
+
+def handle_short_cover():
+    s = st.session_state
+    code = str(s.cover_code).strip()
+    pos = s.get('portfolio', {}).get(code)
+    # 逆クロスガード(UI側): 空売り建玉が無い銘柄は買い戻し不可。
+    if not (pos and pos.get('position_side', 'long') == 'short' and pos.get('qty', 0) > 0):
+        st.toast("⚠️ その銘柄の空売り建玉がありません", icon="⚠️")
+        return
+    execute_transaction("買い戻し", s.cover_date, code, s.cover_qty, s.cover_price, False)
+    s.cover_code = ""
+    s.cover_price = 0.0
 
 def handle_adjust():
     s = st.session_state
@@ -408,6 +488,44 @@ def main():
             
             st.write("")
 
+            with st.container():
+                st.subheader("🟠 新規売り (空売り・カラ売り)")
+                st.caption("株を借りて先に売る取引です。値下がりすると利益になります。")
+                c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
+                with c1: st.date_input("日付", date.today(), key="short_date", label_visibility="collapsed")
+                with c2: st.text_input("証券コード", placeholder="証券コード", key="short_code", label_visibility="collapsed")
+                with c3_radio: short_mode = st.radio("入力", ["選択", "手入"], key="short_mode", label_visibility="collapsed", horizontal=False)
+                with c3:
+                    if short_mode == "選択": st.selectbox("数量", qty_options, index=0, key="short_qty", label_visibility="collapsed")
+                    else: st.number_input("数量(手入力)", min_value=1, step=100, key="short_qty_manual")
+
+                final_short_qty = st.session_state.short_qty if short_mode == "選択" else st.session_state.get("short_qty_manual", 0)
+                if short_mode == "手入": st.session_state.short_qty = final_short_qty
+
+                with c4: st.number_input("単価(売建値)", step=0.1, format="%.1f", placeholder="単価", key="short_price", label_visibility="collapsed")
+                with c5: st.button("新規売り実行", on_click=handle_short_open, use_container_width=True, help="持っていない株を証券会社から借りて売建します。あとで『買い戻し』して返済します。")
+
+            st.write("")
+
+            with st.container():
+                st.subheader("🟢 買い戻し (空売りの決済)")
+                st.caption("借りていた株を買い戻して返します。これで空売りの損益が確定します。")
+                c1, c2, c3_radio, c3, c4, c5 = st.columns([1.2, 1.2, 0.5, 1, 1, 1])
+                with c1: st.date_input("日付", date.today(), key="cover_date", label_visibility="collapsed")
+                with c2: st.text_input("証券コード", placeholder="証券コード", key="cover_code", label_visibility="collapsed")
+                with c3_radio: cover_mode = st.radio("入力", ["選択", "手入"], key="cover_mode", label_visibility="collapsed", horizontal=False)
+                with c3:
+                    if cover_mode == "選択": st.selectbox("数量", qty_options, index=0, key="cover_qty", label_visibility="collapsed")
+                    else: st.number_input("数量(手入力)", min_value=1, step=100, key="cover_qty_manual")
+
+                final_cover_qty = st.session_state.cover_qty if cover_mode == "選択" else st.session_state.get("cover_qty_manual", 0)
+                if cover_mode == "手入": st.session_state.cover_qty = final_cover_qty
+
+                with c4: st.number_input("単価(買戻値)", step=0.1, format="%.1f", placeholder="単価", key="cover_price", label_visibility="collapsed")
+                with c5: st.button("買い戻し実行", on_click=handle_short_cover, use_container_width=True, help="新規売りした株を買い戻して返済します。売った値段より安く買い戻せた分が利益です。")
+
+            st.write("")
+
             st.markdown("### ⚙️ 過去の損益をまとめて調整する")
             with st.container():
                 st.info("ここにスプレッドシートの累計損益（例: -2150000）を入力すると、計算のスタート地点を合わせることができます。")
@@ -443,9 +561,12 @@ def main():
         # 3. データ整形とエラー名の自動修復
         for code, v in st.session_state.portfolio.items():
             if v['qty'] <= 0: continue
-            
+
+            side = v.get('position_side', 'long')   # 'long'(買い建て) or 'short'(空売り)
+            is_short = (side == 'short')
+
             name = v.get('name', "")
-            
+
             # エラー文字や英語表記のみの場合は再取得して修復
             needs_update = False
             if not name or "コード(" in str(name):
@@ -460,8 +581,10 @@ def main():
                 if new_name and "コード(" not in new_name:
                     name = new_name
                     st.session_state.portfolio[code]['name'] = name # メモリ上更新
-            
-            port_options[code] = f"{name} ({code})"
+
+            # 恩株シミュレーターの対象は買い建てのみ(空売りは除外)
+            if not is_short:
+                port_options[code] = f"{name} ({code})"
 
             data = market_data.get(code, {'price': 0, 'diff': 0})
             current_price = data['price']
@@ -470,10 +593,13 @@ def main():
             cost = v['qty'] * v['avg_price']
             is_data_error = (current_price == 0)
 
-            if v['avg_price'] == 0:
+            if is_short:
+                # 空売り建玉: 恩株判定は通さない(空売りに恩株の概念は無い)。
+                status_text = "🟠 空売り建玉（値下がりで利益）"
+            elif v['avg_price'] == 0:
                 status_text = "👑 恩株 (コスト0円)"
                 if not is_data_error:
-                    total_onkabu_value += (current_price * v['qty']) 
+                    total_onkabu_value += (current_price * v['qty'])
             else:
                 is_onkabu = v['realized_pl'] >= cost
                 if is_onkabu: status_text = "🏆完全恩株達成！"
@@ -489,10 +615,16 @@ def main():
                 unrealized_pl = 0 
             else:
                 current_price_disp = f"{int(current_price):,}円"
-                unrealized_pl = (current_price - v['avg_price']) * v['qty']
-                
-                # 恩株（コスト0）の場合は合計計算に含めない
-                if v['avg_price'] > 0:
+                if is_short:
+                    unrealized_pl = (v['avg_price'] - current_price) * v['qty']   # 値下がりで含み益(符号反転)
+                else:
+                    unrealized_pl = (current_price - v['avg_price']) * v['qty']
+
+                if is_short:
+                    # 空売りは資金を投下しないので『総投資額』には含めない。含み損益のみ合計に反映。
+                    total_portfolio_pl += unrealized_pl
+                elif v['avg_price'] > 0:
+                    # 恩株（コスト0）の場合は合計計算に含めない
                     total_portfolio_cost += cost
                     total_portfolio_pl += unrealized_pl
                 
@@ -511,7 +643,10 @@ def main():
 
                 unrealized_pct = 0.0
                 if calc_base_price > 0:
-                    unrealized_pct = ((current_price - calc_base_price) / calc_base_price) * 100
+                    if is_short:
+                        unrealized_pct = ((calc_base_price - current_price) / calc_base_price) * 100   # 値下がり=プラス
+                    else:
+                        unrealized_pct = ((current_price - calc_base_price) / calc_base_price) * 100
                 
                 mark_pl = "🔺" if unrealized_pl > 0 else "▼" if unrealized_pl < 0 else "➖"
                 pl_str = f"{mark_pl} {int(unrealized_pl):,}"
@@ -519,7 +654,7 @@ def main():
                 pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
             rows.append({
-                '証券コード': code, '銘柄名': name, '現在値': current_price_disp,
+                '証券コード': code, '銘柄名': (f"🟠 {name}" if is_short else name), '現在値': current_price_disp,
                 '前日比': change_str, '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
                 '騰落率': pct_str, '含み損益': pl_str, '保有元本': f"{int(cost):,}",
                 'ステータス': status_text
@@ -741,9 +876,11 @@ def main():
             else:
                 name_disp = sub_df.iloc[0]['銘柄名']
                 sub_pl = sub_df['確定損益'].sum()
-                if sub_pl > 0: label = f"🟥 {name_disp} ({c}) | 累計利益: +¥{int(sub_pl):,}"
-                elif sub_pl < 0: label = f"🟦 {name_disp} ({c}) | 累計損失: ¥{int(sub_pl):,}"
-                else: label = f"📁 {name_disp} ({c}) | 累計損益: ¥0"
+                port_entry = st.session_state.portfolio.get(str(c), {})
+                short_badge = " 🟠[空売り保有中]" if port_entry.get('position_side') == 'short' and port_entry.get('qty', 0) > 0 else ""
+                if sub_pl > 0: label = f"🟥 {name_disp} ({c}){short_badge} | 累計利益: +¥{int(sub_pl):,}"
+                elif sub_pl < 0: label = f"🟦 {name_disp} ({c}){short_badge} | 累計損失: ¥{int(sub_pl):,}"
+                else: label = f"📁 {name_disp} ({c}){short_badge} | 累計損益: ¥0"
 
             with st.expander(label):
                 if c != "ADJUST":
@@ -772,6 +909,7 @@ def main():
                     use_container_width=True, hide_index=True,
                     column_config={
                         "削除": st.column_config.CheckboxColumn("削除", width="small"),
+                        "区分": st.column_config.SelectboxColumn("区分", options=["買い","新規買付","買い増し","売り","売却","新規売り","買い戻し","データ調整","報酬精算"], help="取引の種類。空売りは『新規売り』で建てて『買い戻し』で決済します。誤記すると損益が0で計算されるため選択式にしています。"),
                         "ボーナス": st.column_config.CheckboxColumn("🎉恩株", width="small", help="恩株化（元本全回収）の取引だった場合はチェック"),
                         "日付": st.column_config.DateColumn("日付", format="YYYY-MM-DD"),
                         "数量": st.column_config.NumberColumn("数量", min_value=0),
