@@ -516,6 +516,43 @@ def handle_short_cover():
     s.cover_code = ""
     s.cover_price = 0.0
 
+def handle_close_position(code, side, date_val, qty_val, price_val):
+    # 反対売買(決済)の実行: 建玉の向きに応じて『売り』(買い建て) か『買い戻し』(空売り) を自動発行する。
+    # 損益計算・保存・各種ガード(保有数クランプ/逆クロス防止/二重タップ5秒)は既存の
+    # execute_transaction / recalculate_all をそのまま使う(新しい計算は書かない)。
+    if not IS_ADMIN: return
+    code = str(code).strip()
+    if qty_val <= 0 or price_val <= 0:
+        st.toast("⚠️ 株数と単価（実際に売れた値段）を入れてください", icon="⚠️")
+        return
+    tx_type = "買い戻し" if side == 'short' else "売り"
+    execute_transaction(tx_type, date_val, code, qty_val, price_val, False)
+    st.rerun()
+
+def render_close_panel(code, info):
+    # 保有カードから「コード入力なし」で決済する常時表示のポップアップ(st.popover)。
+    # 買い建て→売り / 空売り→買い戻し をボタン側で自動判別(handle_close_position)。
+    code = str(code).strip()
+    is_short = (info.get('side') == 'short')
+    qty_held = int(info.get('qty', 0))
+    if qty_held <= 0: return
+    label = "🔄 反対売買で決済（買い戻し）" if is_short else "🔄 反対売買で決済（売り）"
+    with st.popover(label, use_container_width=True):
+        kind = "空売り建玉" if is_short else "買い建て"
+        st.markdown(f"**{info.get('name','')}（{code}）**　{kind} {qty_held:,}株")
+        st.caption("コード入力なしで決済します。株数は一部だけでもOK。")
+        cdate = st.date_input("日付", date.today(), key=f"close_date_{code}")
+        cqty = st.number_input("株数", min_value=min(100, qty_held), max_value=qty_held,
+                               value=qty_held, step=100, key=f"close_qty_{code}")
+        _pending = info.get('pending', False)
+        _defp = 0.0 if _pending else float(info.get('price', 0) or 0)
+        cprice = st.number_input("単価", min_value=0.0, value=_defp, step=0.1, format="%.1f",
+                                 key=f"close_price_{code}")
+        st.caption("⚠️ 単価は今の株価が入っています。約定した実際の値段に直してください。")
+        btn = "買い戻して決済する" if is_short else "売って決済する"
+        if st.button(btn, key=f"close_btn_{code}", type="primary", use_container_width=True):
+            handle_close_position(code, info.get('side'), cdate, int(cqty), float(cprice))
+
 def handle_adjust():
     s = st.session_state
     execute_transaction("データ調整", s.adj_date, "ADJUST", 0, s.adj_amount, False)
@@ -709,6 +746,7 @@ def main():
         
         rows = []
         port_options = {}
+        close_info = {}   # 反対売買(決済)パネル用: 銘柄ごとの建玉情報(向き・名前・株数・現在値)
 
         # 3. データ整形とエラー名の自動修復
         for code, v in st.session_state.portfolio.items():
@@ -817,6 +855,8 @@ def main():
                 mark_pct = "+" if unrealized_pct > 0 else ""
                 pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
+            close_info[code] = {'side': side, 'name': name, 'qty': int(v['qty']),
+                                'price': current_price, 'pending': is_data_error}
             rows.append({
                 '証券コード': code, '銘柄名': (f"🟠 {name}" if is_short else name), '現在値': current_price_disp,
                 '前日比': change_str, '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
@@ -846,6 +886,9 @@ def main():
                         
                         st.text(f"保有: {row['保有株数']}株 | 元本: {row['保有元本']}")
                         st.info(f"{row['ステータス']}")
+                        if IS_ADMIN:
+                            _ci = close_info.get(row['証券コード'])
+                            if _ci: render_close_panel(row['証券コード'], _ci)
                         st.divider()
             else:
                 df = pd.DataFrame(rows).sort_values('証券コード')
