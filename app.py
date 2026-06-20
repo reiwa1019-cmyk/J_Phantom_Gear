@@ -522,11 +522,11 @@ def handle_close_position(code, side, date_val, qty_val, price_val):
     # execute_transaction / recalculate_all をそのまま使う(新しい計算は書かない)。
     if not IS_ADMIN: return
     code = str(code).strip()
-    if qty_val <= 0 or price_val <= 0:
+    if qty_val <= 0 or price_val is None or float(price_val) <= 0:
         st.toast("⚠️ 株数と単価（実際に売れた値段）を入れてください", icon="⚠️")
         return
     tx_type = "買い戻し" if side == 'short' else "売り"
-    execute_transaction(tx_type, date_val, code, qty_val, price_val, False)
+    execute_transaction(tx_type, date_val, code, qty_val, float(price_val), False)
     st.rerun()
 
 def render_close_panel(code, info):
@@ -544,12 +544,12 @@ def render_close_panel(code, info):
         cdate = st.date_input("日付", date.today(), key=f"close_date_{code}")
         cqty = st.number_input("株数", min_value=min(100, qty_held), max_value=qty_held,
                                value=qty_held, step=100, key=f"close_qty_{code}")
-        cprice = st.number_input("単価", min_value=0.0, value=0.0, step=0.1, format="%.1f",
-                                 key=f"close_price_{code}")
+        cprice = st.number_input("単価", min_value=0.0, value=None, step=0.1, format="%.1f",
+                                 placeholder="実際に売れた値段を入力", key=f"close_price_{code}")
         st.caption("⚠️ 実際に売れた(約定した)値段を入れてください。")
         btn = "買い戻して決済する" if is_short else "売って決済する"
         if st.button(btn, key=f"close_btn_{code}", type="primary", use_container_width=True):
-            handle_close_position(code, info.get('side'), cdate, int(cqty), float(cprice))
+            handle_close_position(code, info.get('side'), cdate, int(cqty), cprice)
 
 def handle_adjust():
     s = st.session_state
