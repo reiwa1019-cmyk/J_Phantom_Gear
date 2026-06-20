@@ -854,7 +854,8 @@ def main():
                 pct_str = f"{mark_pct}{unrealized_pct:.2f}%"
 
             close_info[code] = {'side': side, 'name': name, 'qty': int(v['qty']),
-                                'price': current_price, 'pending': is_data_error}
+                                'price': current_price, 'pending': is_data_error,
+                                'avg': float(v['avg_price'])}
             rows.append({
                 '証券コード': code, '銘柄名': (f"🟠 {name}" if is_short else name), '現在値': current_price_disp,
                 '前日比': change_str, '保有株数': v['qty'], '平均取得単価': f"{v['avg_price']:,.0f}",
@@ -864,29 +865,39 @@ def main():
             
         if rows:
             if use_mobile_view:
+                # スマホ用コンパクトカード: 一番見たい含み損益を大きく色付き(赤=益/青=損)、
+                # 恩株は不要表示(平均0/元本0)を消し、縦の長さを詰める。
                 for row in rows:
+                    rcode = row['証券コード']
+                    ci = close_info.get(rcode, {})
+                    is_short_c = (ci.get('side') == 'short')
+                    is_onkabu_c = (ci.get('avg', 1) == 0 and not is_short_c)
                     with st.container():
-                        st.markdown(f"#### {row['銘柄名']} ({row['証券コード']})")
-                        mc1, mc2 = st.columns(2)
-                        with mc1:
-                            st.write(f"現在値: {row['現在値']}")
-                            
-                            diff_val = row['前日比']
-                            if "+" in diff_val: color = "red"
-                            elif "-" in diff_val: color = "blue"
-                            else: color = "gray"
-                            st.markdown(f"<span style='color:{color}; font-size:0.9em'>前日比: {diff_val}</span>", unsafe_allow_html=True)
-
-                            st.caption(f"平均: {row['平均取得単価']}円")
-                        with mc2:
-                            st.write(f"含み損益: {row['含み損益']}")
-                            st.caption(f"騰落率: {row['騰落率']}")
-                        
-                        st.text(f"保有: {row['保有株数']}株 | 元本: {row['保有元本']}")
+                        st.markdown(
+                            f"**{row['銘柄名']}**　<span style='color:gray;font-size:0.8em'>{rcode}</span>",
+                            unsafe_allow_html=True)
+                        diff_val = row['前日比']
+                        dcolor = "#d32f2f" if "+" in diff_val else "#1976d2" if "-" in diff_val else "gray"
+                        st.markdown(
+                            f"<span style='font-size:1.15em;font-weight:600'>{row['現在値']}</span>"
+                            f"　<span style='color:{dcolor};font-size:0.85em'>前日比 {diff_val}</span>",
+                            unsafe_allow_html=True)
+                        pl = row['含み損益']
+                        plcolor = "#d32f2f" if "🔺" in pl else "#1976d2" if "▼" in pl else "gray"
+                        st.markdown(
+                            f"<span style='font-size:0.78em;color:gray'>含み損益</span>　"
+                            f"<span style='font-size:1.3em;font-weight:700;color:{plcolor}'>{pl}</span>"
+                            f"　<span style='font-size:0.85em;color:{plcolor}'>({row['騰落率']})</span>",
+                            unsafe_allow_html=True)
+                        if is_onkabu_c:
+                            st.caption(f"{int(row['保有株数']):,}株（タダ株）")
+                        elif is_short_c:
+                            st.caption(f"{int(row['保有株数']):,}株 ・ 売建 {row['平均取得単価']}")
+                        else:
+                            st.caption(f"{int(row['保有株数']):,}株 ・ 平均 {row['平均取得単価']} ・ 元本 {row['保有元本']}")
                         st.info(f"{row['ステータス']}")
-                        if IS_ADMIN:
-                            _ci = close_info.get(row['証券コード'])
-                            if _ci: render_close_panel(row['証券コード'], _ci)
+                        if IS_ADMIN and ci:
+                            render_close_panel(rcode, ci)
                         st.divider()
             else:
                 df = pd.DataFrame(rows).sort_values('証券コード')
